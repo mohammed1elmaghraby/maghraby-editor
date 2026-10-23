@@ -14,6 +14,8 @@ import java.io.InputStream;
 import java.io.PrintStream;
 import java.io.UnsupportedEncodingException;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.List;
@@ -55,13 +57,22 @@ public class Main {
     private static int leftCol = 0;
 
     private static final String DEFAULT_STATUS =
-            "NORMAL | i:Insert  ::Command  u:Undo  r:Redo  F5:Run  q:Quit  (:help)";
+            "i:insert  ::command  Tab:chat  u:undo  r:redo  F5:run  q:quit  (:help)";
     private static final String HELP =
-            ":w [file]  :wq  :q  :q!  :run [args]  :compile  :lsp [stop]  |  F5 run  Ctrl+S save  Ctrl+Q force-quit";
+            ":w [file]  :wq  :q  :q!  :run [args]  :compile  :lsp [stop]  :chat [clear|stop]  :set rnu|nornu  |  Tab chat  F5 run  Ctrl+S save  Ctrl+Q force-quit";
 
     private static volatile String statusMessage = DEFAULT_STATUS;
     private static volatile Mode currentMode = Mode.NORMAL;
     private static final StringBuffer commandInput = new StringBuffer();
+
+    // --- Chat side panel (left), relative line numbers and git branch (status line) ---
+    private static volatile boolean chatVisible = true;
+    private static final StringBuffer chatInput = new StringBuffer();
+    private static volatile int chatScroll = 0; // lines scrolled back from the newest message
+    private static final Chat chat = new Chat(() -> needsRedraw = true);
+    private static volatile boolean relativeNumbers = true;
+    private static volatile String gitBranch = "";
+    private static int lastClockMinute = -1;    // Render thread only
 
     private static volatile int termRows = 24;
     private static volatile int termCols = 80;
@@ -141,7 +152,7 @@ public class Main {
     private static String lastStatusSeen = "";
     private static long statusSince = System.currentTimeMillis();
 
-    enum Mode { NORMAL, INSERT, COMMAND }
+    enum Mode { NORMAL, INSERT, COMMAND, CHAT }
 
     private static PrintStream createOut() {
         try {
@@ -169,6 +180,7 @@ public class Main {
             statusMessage = editor.loadFromFile(currentFilename);
             startLsp(currentFilename); // background: never delays startup
         }
+        refreshGitBranch();
 
         Runtime.getRuntime().addShutdownHook(new Thread(Main::restoreTerminal, "Terminal-Restore"));
 
@@ -195,6 +207,7 @@ public class Main {
                 try { renderThread.join(1000); } catch (InterruptedException ignored) { Thread.currentThread().interrupt(); }
             }
             restoreTerminal(); // give the screen back first, the language server shutdown may take a moment
+            chat.close();
             stopLsp(true);
         }
     }
@@ -342,6 +355,8 @@ public class Main {
             cursorRow = pos[0];
             cursorCol = pos[1];
             triggerCompletion();
+        } else if (currentMode == Mode.CHAT) {
+            if (chatInput.length() < 4000) chatInput.append(s);
         } else if (currentMode == Mode.COMMAND) {
             commandInput.append(s);
         } else if (s.length() == 1) {
@@ -432,6 +447,8 @@ public class Main {
     }
 
     private static void handleTab() {
+        if (currentMode == Mode.NORMAL) { enterChat(); return; }
+        if (currentMode == Mode.CHAT) { leaveChat(); return; }
         if (currentMode != Mode.INSERT) return;
         if (suggestionsOpen()) { // Tab accepts the highlighted suggestion
             acceptSuggestion();
@@ -449,6 +466,13 @@ public class Main {
             cursorRow = pos[0];
             cursorCol = pos[1];
             if (showingSuggestions) triggerCompletion(); // narrows, or closes when nothing is left to complete
+        } else if (currentMode == Mode.CHAT) {
+            int n = chatInput.length();
+            if (n > 0) {
+                int cut = n >= 2 && Character.isLowSurrogate(chatInput.charAt(n - 1))
+                        && Character.isHighSurrogate(chatInput.charAt(n - 2)) ? 2 : 1;
+                chatInput.setLength(n - cut);
+            }
         } else if (currentMode == Mode.COMMAND) {
             if (commandInput.length() > 0) {
                 commandInput.deleteCharAt(commandInput.length() - 1);
@@ -487,6 +511,8 @@ public class Main {
             int[] pos = editor.insertAt(cursorRow, cursorCol, insert.toString());
             cursorRow = pos[0];
             cursorCol = pos[1];
+        } else if (currentMode == Mode.CHAT) {
+            sendChat();
         } else if (currentMode == Mode.COMMAND) {
             String cmd = commandInput.toString().trim();
             commandInput.setLength(0);
@@ -508,6 +534,10 @@ public class Main {
     }
 
     private static void handleArrow(int rowDelta, int colDelta) {
+        if (currentMode == Mode.CHAT) { // Up/Down scroll the conversation (Up = older)
+            if (rowDelta != 0) chatScroll = Math.max(0, chatScroll - rowDelta);
+            return;
+        }
         if (suggestionsOpen()) {
             List<LspDocumentSync.Completion> list = activeSuggestions;
             if (list != null && rowDelta != 0) { // Up/Down move the selection
@@ -543,16 +573,16 @@ public class Main {
 
     private static void handleHome() {
         if (showingSuggestions) closeSuggestions();
-        if (currentMode != Mode.COMMAND) cursorCol = 0;
+        if (currentMode == Mode.NORMAL || currentMode == Mode.INSERT) cursorCol = 0;
     }
 
     private static void handleEnd() {
         if (showingSuggestions) closeSuggestions();
-        if (currentMode != Mode.COMMAND) cursorCol = editor.getLineLength(cursorRow);
+        if (currentMode == Mode.NORMAL || currentMode == Mode.INSERT) cursorCol = editor.getLineLength(cursorRow);
     }
 
     private static void handlePage(int direction) {
-        if (currentMode == Mode.COMMAND) return;
+        if (currentMode == Mode.COMMAND || currentMode == Mode.CHAT) return;
         if (showingSuggestions) closeSuggestions();
         int step = Math.max(1, termRows - 4);
         cursorRow += direction * step;
@@ -586,6 +616,7 @@ public class Main {
         if (ok) {
             boolean renamed = !target.equals(currentFilename);
             currentFilename = target;
+            refreshGitBranch();
             if (renamed) startLsp(target); // a new name can mean a different language (Untitled.txt -> a.go)
         }
         return ok;
@@ -613,6 +644,30 @@ public class Main {
                     statusMessage = "LSP stopped.";
                 } else {
                     startLsp(currentFilename);
+                }
+                break;
+            case "chat":
+                if (arg.equals("clear")) {
+                    chat.clear();
+                    chatScroll = 0;
+                    statusMessage = "Chat cleared.";
+                } else if (arg.equals("stop")) {
+                    chat.cancel();
+                    statusMessage = "Chat request cancelled.";
+                } else {
+                    chatVisible = !chatVisible;
+                    statusMessage = chatVisible ? "Chat panel shown." : "Chat panel hidden.";
+                }
+                break;
+            case "set":
+                if (arg.equals("rnu") || arg.equals("relativenumber")) {
+                    relativeNumbers = true;
+                    statusMessage = "Relative line numbers on.";
+                } else if (arg.equals("nornu") || arg.equals("norelativenumber")) {
+                    relativeNumbers = false;
+                    statusMessage = "Relative line numbers off.";
+                } else {
+                    statusMessage = "Unknown option: " + arg + "   (rnu, nornu)";
                 }
                 break;
             case "help": case "h": statusMessage = HELP; break;
@@ -820,8 +875,13 @@ public class Main {
             }
             // Animations (LSP spinner, fading status message) only need a repaint ~10x per second.
             long now = System.nanoTime();
-            if (now - lastAnimTick > 100_000_000L && (statusFadePending || lspStarting())) {
+            if (now - lastAnimTick > 100_000_000L && (statusFadePending || lspStarting() || chat.busy())) {
                 lastAnimTick = now;
+                needsRedraw = true;
+            }
+            int minute = java.time.LocalTime.now().getMinute(); // keep the status-line clock current
+            if (minute != lastClockMinute) {
+                lastClockMinute = minute;
                 needsRedraw = true;
             }
         }
@@ -837,6 +897,7 @@ public class Main {
     private static String modeHint(Mode mode) {
         switch (mode) {
             case INSERT: return "-- INSERT --  Esc:normal  Tab:accept/indent  ↑↓:choose suggestion";
+            case CHAT: return "-- CHAT --  Enter:send  Esc/Tab:editor  ↑↓:scroll  /clear  /stop";
             case COMMAND: return HELP;
             default: return DEFAULT_STATUS;
         }
@@ -845,22 +906,23 @@ public class Main {
     private static int modeColor(Mode mode) {
         switch (mode) {
             case INSERT: return 78;   // green
-            case COMMAND: return 177; // violet
+            case COMMAND: return 215; // orange
+            case CHAT: return 141;    // violet
             default: return 75;       // blue
         }
     }
 
-    /** {background, foreground} 256-colour numbers for a status message, chosen by what it says. */
-    private static int[] statusColors(String msg, Mode mode) {
+    /** Foreground colour of a status message, chosen by what it says. */
+    private static String statusFg(String msg) {
         String m = msg.toLowerCase(java.util.Locale.ROOT);
-        if (m.contains("unsaved")) return new int[]{172, 16};
-        if (m.contains("error") || m.contains("failed") || m.contains("not found") || m.contains("unknown command")
+        if (m.contains("unsaved")) return fg(214);
+        if (m.contains("error") || m.contains("failed") || m.contains("not found") || m.contains("unknown")
                 || m.contains("no language server") || m.contains("exited with code 1") || m.contains("can't")
-                || m.contains("internal")) return new int[]{124, 231};
+                || m.contains("internal") || m.contains("too small")) return fg(203);
         if (m.startsWith("saved") || m.startsWith("loaded") || m.startsWith("undone") || m.startsWith("redone")
                 || m.contains("compiled ok") || m.contains("syntax ok") || m.contains("exited with code 0")
-                || m.contains("lsp stopped")) return new int[]{28, 231};
-        return new int[]{238, 252};
+                || m.contains("lsp stopped") || m.contains("cleared")) return fg(78);
+        return fg(250);
     }
 
     private static char kindLetter(int kind) {
@@ -907,6 +969,245 @@ public class Main {
         return sb.append(ANSI_RESET).toString();
     }
 
+    // ------------------------------------------------------------------
+    // Chat panel, git branch and small layout helpers
+    // ------------------------------------------------------------------
+
+    /** One screen line under construction: ANSI-coloured text plus its visible width. */
+    private static final class Line {
+        final StringBuilder colored = new StringBuilder();
+        int len = 0;
+
+        Line add(String style, String text) {
+            colored.append(style).append(text);
+            len += text.length();
+            return this;
+        }
+    }
+
+    /** The rendered chat panel: one pre-padded string per row, plus where the text cursor goes. */
+    private static final class ChatView {
+        String[] cells;
+        int cursorRow = 0; // 0-based panel row of the input line
+        int cursorCol = 0; // 0-based panel column of the text cursor
+    }
+
+    private static void enterChat() {
+        if (termCols < 80 || termRows < 11) {
+            statusMessage = "Terminal too small for the chat panel (needs 80x11).";
+            return;
+        }
+        chatVisible = true;
+        currentMode = Mode.CHAT;
+        statusMessage = modeHint(Mode.CHAT);
+    }
+
+    private static void leaveChat() {
+        currentMode = Mode.NORMAL;
+        statusMessage = "NORMAL MODE";
+    }
+
+    private static void sendChat() {
+        String text = chatInput.toString().trim();
+        if (text.isEmpty()) return;
+
+        if (text.startsWith("/")) { // panel commands never reach the backend
+            chatInput.setLength(0);
+            switch (text) {
+                case "/clear": chat.clear(); chatScroll = 0; statusMessage = "Chat cleared."; break;
+                case "/stop": chat.cancel(); statusMessage = "Chat request cancelled."; break;
+                default: statusMessage = "Unknown chat command: " + text + "   (/clear, /stop)";
+            }
+            return;
+        }
+        if (chat.busy()) {
+            statusMessage = "Still waiting for the previous answer. /stop cancels it.";
+            return;
+        }
+
+        // The backend gets a little context about what is open; the panel only shows what was typed.
+        Path file = null;
+        try {
+            file = Paths.get(currentFilename.trim()).toAbsolutePath().normalize();
+        } catch (RuntimeException ignored) { }
+        String prompt = text;
+        Path workDir = null;
+        if (file != null) {
+            prompt = "I'm editing " + file + " (cursor at line " + (cursorRow + 1) + ", column "
+                    + (cursorCol + 1) + ").\n\n" + text;
+            workDir = LspDocumentSync.findRoot(file);
+        }
+        chatInput.setLength(0);
+        chatScroll = 0;
+        chat.send(text, prompt, workDir);
+    }
+
+    /** Reads the current git branch (or short commit id) by looking for .git/HEAD above the open file. */
+    private static void refreshGitBranch() {
+        String result = "";
+        try {
+            Path file = Paths.get(currentFilename.trim()).toAbsolutePath().normalize();
+            for (Path p = file.getParent(); p != null; p = p.getParent()) {
+                Path head = p.resolve(".git").resolve("HEAD");
+                if (Files.isRegularFile(head)) {
+                    String h = new String(Files.readAllBytes(head), StandardCharsets.UTF_8).trim();
+                    result = h.startsWith("ref:") ? h.substring(h.lastIndexOf('/') + 1)
+                            : h.substring(0, Math.min(7, h.length()));
+                    break;
+                }
+            }
+        } catch (IOException | RuntimeException ignored) { }
+        gitBranch = result;
+    }
+
+    private static int[] diagCounts() {
+        int errors = 0, warnings = 0;
+        for (LspClient.Diagnostic d : diagnostics) {
+            if (d.severity == 1) errors++;
+            else if (d.severity == 2) warnings++;
+        }
+        return new int[]{errors, warnings};
+    }
+
+    private static String clip(String s, int max) {
+        if (max <= 0) return "";
+        return s.length() <= max ? s : s.substring(0, Math.max(0, max - 1)) + "…";
+    }
+
+    private static String repeat(String unit, int n) {
+        StringBuilder sb = new StringBuilder(Math.max(0, n) * unit.length());
+        for (int i = 0; i < n; i++) sb.append(unit);
+        return sb.toString();
+    }
+
+    private static String baseName(String path) {
+        int slash = Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\'));
+        return slash >= 0 ? path.substring(slash + 1) : path;
+    }
+
+    private static String shortDir() {
+        String dir = System.getProperty("user.dir", ".");
+        String home = System.getProperty("user.home", "");
+        if (!home.isEmpty() && dir.startsWith(home)) dir = "~" + dir.substring(home.length());
+        return dir;
+    }
+
+    /** A Line cut or padded to exactly `width` cells. */
+    private static String cell(Line l, int width) {
+        String s = sliceAnsi(l.colored.toString(), 0, width);
+        return s + spaces(width - Math.min(l.len, width)) + ANSI_RESET;
+    }
+
+    /** Word-wraps text to `width` columns, keeping explicit line breaks. */
+    private static List<String> wrap(String text, int width) {
+        List<String> out = new ArrayList<>();
+        if (width < 1) return out;
+        for (String raw : text.split("\n", -1)) { // split first: sanitize() would turn '\n' into '·'
+            String para = sanitize(raw);
+            if (para.isEmpty()) {
+                out.add("");
+                continue;
+            }
+            int i = 0;
+            while (i < para.length()) {
+                int end = Math.min(para.length(), i + width);
+                boolean brokeAtSpace = false;
+                if (end < para.length()) {
+                    int sp = para.lastIndexOf(' ', end);
+                    if (sp > i) {
+                        end = sp;
+                        brokeAtSpace = true;
+                    } else if (end > i + 1 && Character.isLowSurrogate(para.charAt(end))) {
+                        end--; // never split a surrogate pair
+                    }
+                }
+                out.add(para.substring(i, end).stripTrailing());
+                i = end;
+                if (brokeAtSpace) while (i < para.length() && para.charAt(i) == ' ') i++;
+            }
+        }
+        return out;
+    }
+
+    /**
+     * Lays out the chat panel: header, conversation (newest at the bottom, scrollable), a rule,
+     * the input line and a hint line. Every returned row is exactly `w` cells wide.
+     */
+    private static ChatView buildChatPanel(int w, int h, boolean focused, long now) {
+        ChatView v = new ChatView();
+        v.cells = new String[h];
+        Line blank = new Line();
+        int inner = Math.max(1, w - 2);
+        int msgRows = h - 5;
+
+        Line head = new Line();
+        head.add(fg(141) + BOLD, " MAGHRABY ").add(fg(60) + BOLD_OFF, "/// ")
+                .add(fg(245), clip(shortDir() + " · " + Chat.backendLabel(), w - 15));
+        v.cells[0] = cell(head, w);
+        v.cells[1] = cell(blank, w);
+
+        List<Line> all = new ArrayList<>();
+        for (Chat.Message m : chat.messages()) {
+            if (m.role == Chat.Role.USER) {
+                for (String l : wrap(m.text, w - 4)) {
+                    all.add(new Line().add(fg(141) + BOLD_OFF, " │ ").add(fg(252), l));
+                }
+            } else {
+                String color = m.role == Chat.Role.ERROR ? fg(203) : fg(252);
+                for (String l : wrap(m.text, inner)) all.add(new Line().add(color, " " + l));
+                if (!m.meta.isEmpty()) {
+                    all.add(new Line());
+                    all.add(new Line().add(fg(240), " " + clip(m.meta, inner)));
+                }
+            }
+            all.add(new Line());
+        }
+        if (chat.busy()) {
+            String frame = SPINNER[(int) ((now / 100) % SPINNER.length)];
+            long secs = Math.max(0, (now - chat.busySince()) / 1000);
+            all.add(new Line().add(fg(221), " " + frame + " Thinking… " + secs + "s"));
+        }
+
+        int total = all.size();
+        int scroll = Math.min(chatScroll, Math.max(0, total - msgRows));
+        if (scroll != chatScroll) chatScroll = scroll; // the user scrolled past the oldest line
+        int start = Math.max(0, total - msgRows - scroll);
+        for (int k = 0; k < msgRows; k++) {
+            int idx = start + k;
+            v.cells[2 + k] = cell(idx < total ? all.get(idx) : blank, w);
+        }
+
+        v.cells[h - 3] = cell(new Line().add(focused ? fg(141) : fg(238), " " + repeat("─", inner)), w);
+
+        String typed = sanitize(chatInput.toString().replace('\n', ' '));
+        int avail = Math.max(1, inner - 2);
+        String shown = typed.length() > avail ? typed.substring(typed.length() - avail) : typed;
+        Line in = new Line().add(fg(78) + BOLD, " ❯ ");
+        if (typed.isEmpty()) in.add(fg(240) + BOLD_OFF, "Ready...");
+        else in.add(fg(252) + BOLD_OFF, shown);
+        v.cells[h - 2] = cell(in, w);
+        v.cursorRow = h - 2;
+        v.cursorCol = 3 + shown.length();
+
+        String hint = focused ? "enter send · esc back · ↑↓ scroll · /clear" : "tab focus chat · :chat hide · /clear";
+        v.cells[h - 1] = cell(new Line().add(fg(240), " " + clip(hint, inner)), w);
+        return v;
+    }
+
+    /** Right-hand side of the status line. `full` adds diagnostics and the scroll percentage. */
+    private static Line statusRight(boolean full, int[] dc, int pct, String pos, String clock) {
+        Line r = new Line();
+        if (full) {
+            if (dc[0] > 0) r.add(bg(235) + fg(203), "✖ " + dc[0] + "  ");
+            if (dc[1] > 0) r.add(bg(235) + fg(214), "▲ " + dc[1] + "  ");
+            r.add(bg(235) + fg(245), pct + "%  ");
+        }
+        r.add(bg(237) + fg(252), " " + pos + " ");
+        r.add(bg(213) + fg(16) + BOLD, " " + clock + " ");
+        r.add(BOLD_OFF, "");
+        return r;
+    }
+
     private static String buildFrame() {
         int rows = termRows;
         int cols = termCols;
@@ -928,8 +1229,18 @@ public class Main {
         int selected = suggestionIndex;
         int row = cursorRow;
         int col = cursorCol;
-        int textRows = rows - 3;
+        int textRows = rows - 3; // rows 2 .. rows-2: between the tab line and the status line
         long now = System.currentTimeMillis();
+
+        // --- Split layout: chat panel on the left, editor on the right ---
+        int chatW = (chatVisible && cols >= 80 && textRows >= 8)
+                ? Math.min(Math.max(30, cols * 2 / 5), cols - 31) : 0;
+        if (mode == Mode.CHAT && chatW == 0) { // the terminal shrank below what the panel needs
+            currentMode = Mode.NORMAL;
+            mode = Mode.NORMAL;
+        }
+        int editorX = chatW > 0 ? chatW + 2 : 1;   // 1-based screen column of the editor's first cell
+        int editorCols = cols - (editorX - 1);
 
         // Tell the highlight-state cache which lines were edited since the previous frame. Done before
         // reading any text: an edit that sneaks in later is reported again and fixed on the next frame.
@@ -941,9 +1252,9 @@ public class Main {
 
         // --- Gutter geometry ---
         int digits = String.valueOf(lineCount).length();
-        int gutterW = digits + 3;            // marker + number + space + separator
-        if (cols - gutterW < 10) gutterW = 0; // pathological narrow terminal: drop the gutter
-        int textCols = cols - gutterW;
+        int gutterW = digits + 3;                 // marker + number + space + separator
+        if (editorCols - gutterW < 10) gutterW = 0; // pathological narrow editor: drop the gutter
+        int textCols = editorCols - gutterW;
 
         // --- Viewport Calculation (Vertical) ---
         if (row < topLine) topLine = row;
@@ -962,18 +1273,22 @@ public class Main {
         else if (vcol >= leftCol + textCols) leftCol = vcol - textCols + 1;
         leftCol = Math.max(0, leftCol);
 
-        // --- Header: mode badge | title | file | LSP badge ---
-        int mc = modeColor(mode);
-        String badgeText = " " + mode + " ";
-        String leftPlain = " maghraby  " + sanitize(filename) + (editor.isDirty() ? " ●" : "");
-        String leftColored = bg(mc) + fg(16) + BOLD + badgeText + BOLD_OFF + bg(235) + fg(75) + BOLD + " maghraby " + BOLD_OFF
-                + fg(240) + " │ " + FG_DEFAULT + fg(252) + sanitize(filename) + FG_DEFAULT
-                + (editor.isDirty() ? fg(214) + " ●" + FG_DEFAULT : "");
-        int leftLen = badgeText.length() + " maghraby ".length() + 3 + sanitize(filename).length() + (editor.isDirty() ? 2 : 0);
+        // --- Tab line (row 1): the open file as a tab, LSP badge on the right ---
+        int[] dc = diagCounts();
+        String tabName = clip(sanitize(baseName(filename)), Math.max(8, cols / 3));
+        Line tab = new Line();
+        tab.add(bg(237) + fg(141) + BOLD, " ▎").add(fg(255), " " + tabName).add(BOLD_OFF, "");
+        if (editor.isDirty()) tab.add(fg(214), " ●");
+        if (dc[0] > 0) tab.add(fg(203), " ✖ " + dc[0]);
+        if (dc[1] > 0) tab.add(fg(214), " ▲ " + dc[1]);
+        tab.add(bg(237), " ").add(bg(234) + fg(240), "  + ");
         String[] badge = lspBadge();
-        sb.append(ESC).append("[1;1H").append(bar(leftColored, leftLen, badge[0], badge[1].length(), cols, bg(235)));
+        sb.append(ESC).append("[1;1H")
+                .append(bar(tab.colored.toString(), tab.len, badge[0], badge[1].length(), cols, bg(234)));
 
-        // --- Render Text Area ---
+        // --- Body: chat panel | editor ---
+        ChatView chatView = chatW > 0 ? buildChatPanel(chatW, textRows, mode == Mode.CHAT, now) : null;
+
         SyntaxHighlighter highlighter = highlighterRegistry.forFileName(filename);
 
         // Highlighter state at the top of the screen (multi-line comments / docstrings opened above it).
@@ -981,8 +1296,13 @@ public class Main {
         stateCache.useHighlighter(highlighter);
         HighlightState state = stateCache.stateAt(topLine, editor::getLines);
 
+        boolean rel = relativeNumbers;
         for (int i = 0; i < textRows; i++) {
-            sb.append(ESC).append('[').append(i + 2).append(";1H").append(ANSI_CLEAR_LINE);
+            sb.append(ESC).append('[').append(i + 2).append(";1H");
+            if (chatView != null) {
+                sb.append(chatView.cells[i])
+                        .append(fg(mode == Mode.CHAT ? 141 : 238)).append('│').append(ANSI_RESET);
+            }
             int lineIdx = topLine + i;
             if (gutterW > 0) {
                 if (i < visible.size()) {
@@ -995,9 +1315,12 @@ public class Main {
                     } else {
                         sb.append(' ');
                     }
-                    String num = String.valueOf(lineIdx + 1);
+                    // Relative numbering: the cursor line shows its real number (left aligned), the
+                    // others show their distance from it.
+                    String num = (current || !rel) ? String.valueOf(lineIdx + 1) : String.valueOf(Math.abs(lineIdx - row));
+                    String pad = spaces(digits - num.length());
                     sb.append(current ? fg(220) + BOLD : fg(241))
-                            .append(spaces(digits - num.length())).append(num).append(ANSI_RESET)
+                            .append(current && rel ? num + pad : pad + num).append(ANSI_RESET)
                             .append(' ').append(current ? fg(220) : fg(238)).append('│').append(ANSI_RESET);
                 } else {
                     sb.append(fg(61)).append('~').append(ANSI_RESET);
@@ -1009,9 +1332,10 @@ public class Main {
                 state = hr.nextState;
                 sb.append(sliceAnsi(hr.coloredLine, leftCol, textCols));
             }
+            sb.append(ESC).append("[K"); // erase the rest of the row; the chat panel is to the left
         }
 
-        // --- Status bar (second to last row): message on the left, position on the right ---
+        // --- Status line (second to last row): mode | branch | file ╱╱╱╱ diagnostics % row:col clock ---
         String hint = modeHint(mode);
         if (!status.equals(lastStatusSeen)) {
             lastStatusSeen = status;
@@ -1020,21 +1344,36 @@ public class Main {
         String shownStatus = status;
         statusFadePending = false;
         if (!status.equals(hint) && !status.equals(DEFAULT_STATUS)) {
-            if (now - statusSince >= STATUS_TTL_MS) shownStatus = hint; // old message fades back to the mode hint
+            if (now - statusSince >= STATUS_TTL_MS) shownStatus = hint; // old message fades back to the hint
             else statusFadePending = true;
         }
-        int[] sc = statusColors(shownStatus, mode);
-        int pct = lineCount <= 1 ? 100 : (int) Math.round(100.0 * row / (lineCount - 1));
-        String pos = " Ln " + (row + 1) + "/" + lineCount + "  Col " + (col + 1) + "  " + pct + "% ";
-        String msg = " " + sanitize(shownStatus);
-        int msgMax = Math.max(0, cols - pos.length());
-        if (msg.length() > msgMax) msg = msg.substring(0, msgMax);
-        String msgColored = bg(sc[0]) + fg(sc[1]) + msg;
-        String posColored = bg(mc) + fg(16) + BOLD + pos + BOLD_OFF;
-        sb.append(ESC).append('[').append(rows - 1).append(";1H")
-                .append(bar(msgColored, msg.length(), posColored, pos.length(), cols, bg(sc[0])));
 
-        // --- Bottom line: command prompt, or the diagnostic under the cursor ---
+        int mc = modeColor(mode);
+        String branch = gitBranch;
+        int pct = lineCount <= 1 ? 100 : (int) Math.round(100.0 * row / (lineCount - 1));
+        java.time.LocalTime t = java.time.LocalTime.now();
+        String clock = String.format(java.util.Locale.ROOT, "%02d:%02d", t.getHour(), t.getMinute());
+
+        Line left = new Line();
+        left.add(bg(mc) + fg(16) + BOLD, " " + mode + " ");
+        if (!branch.isEmpty()) left.add(BOLD_OFF + bg(237) + fg(150), " " + clip(sanitize(branch), 24) + " ");
+        left.add(BOLD_OFF + bg(235) + fg(252),
+                " " + clip(sanitize(baseName(filename)), Math.max(8, cols / 3)) + (editor.isDirty() ? " ●" : "") + " ");
+
+        String posText = (row + 1) + ":" + (col + 1);
+        Line right = statusRight(true, dc, pct, posText, clock);
+        if (left.len + right.len > cols) right = statusRight(false, dc, pct, posText, clock);
+        if (left.len + right.len > cols) right = new Line();
+
+        sb.append(ESC).append('[').append(rows - 1).append(";1H").append(bg(235))
+                .append(sliceAnsi(left.colored.toString(), 0, cols));
+        int fill = cols - Math.min(left.len, cols) - right.len;
+        sb.append(bg(235)).append(fg(60)).append(BOLD_OFF);
+        if (fill >= 3) sb.append(' ').append(repeat("╱", fill - 2)).append(' ');
+        else sb.append(spaces(fill));
+        sb.append(right.colored).append(ANSI_RESET);
+
+        // --- Bottom line: command prompt, a fresh message, the diagnostic under the cursor, or a hint ---
         sb.append(ESC).append('[').append(rows).append(";1H").append(ANSI_CLEAR_LINE);
         String cursorSeq;
         if (mode == Mode.COMMAND) {
@@ -1043,18 +1382,33 @@ public class Main {
             sb.append(fg(177)).append(BOLD).append(':').append(BOLD_OFF).append(FG_DEFAULT).append(shown, 1, shown.length());
             cursorSeq = ESC + "[" + rows + ";" + Math.min(shown.length() + 1, cols) + "H";
         } else {
+            boolean isHint = shownStatus.equals(hint) || shownStatus.equals(DEFAULT_STATUS);
             LspClient.Diagnostic d = bestDiagnosticAt(row);
-            if (d != null) {
+            String text;
+            String color;
+            if (!isHint) {
+                text = " " + shownStatus;
+                color = statusFg(shownStatus);
+            } else if (d != null) {
                 String kind = d.severity == 1 ? "error" : d.severity == 2 ? "warning" : d.severity == 3 ? "info" : "hint";
-                String text = " " + kind + ": " + d.message.replace('\n', ' ').replace('\r', ' ')
+                text = " " + kind + ": " + d.message.replace('\n', ' ').replace('\r', ' ')
                         + (d.source != null ? " [" + d.source + "]" : "");
-                if (text.length() > cols - 1) text = text.substring(0, cols - 1);
-                sb.append(fg(severityColor(d.severity))).append(sanitize(text)).append(ANSI_RESET);
+                color = fg(severityColor(d.severity));
+            } else {
+                text = " " + hint;
+                color = fg(240);
             }
-            int screenRow = (row - topLine) + 2;
-            int screenCol = gutterW + (vcol - leftCol) + 1;
-            cursorSeq = ESC + "[" + Math.max(2, Math.min(screenRow, rows - 2)) + ";"
-                    + Math.max(1, Math.min(screenCol, cols)) + "H";
+            if (text.length() > cols - 1) text = text.substring(0, cols - 1);
+            sb.append(color).append(sanitize(text)).append(ANSI_RESET);
+
+            if (mode == Mode.CHAT && chatView != null) {
+                cursorSeq = ESC + "[" + (2 + chatView.cursorRow) + ";" + Math.min(chatView.cursorCol + 1, chatW) + "H";
+            } else {
+                int screenRow = (row - topLine) + 2;
+                int screenCol = editorX + gutterW + (vcol - leftCol);
+                cursorSeq = ESC + "[" + Math.max(2, Math.min(screenRow, rows - 2)) + ";"
+                        + Math.max(editorX, Math.min(screenCol, cols)) + "H";
+            }
         }
 
         // --- Suggestions popup (drawn last so it floats above the text) ---
@@ -1070,14 +1424,14 @@ public class Main {
                 LspDocumentSync.Completion c = suggestions.get(k);
                 width = Math.max(width, 4 + c.label.length() + (c.detail.isEmpty() ? 0 : 2 + Math.min(c.detail.length(), 28)));
             }
-            width = Math.min(width, Math.min(cols, 64));
+            width = Math.min(width, Math.min(editorCols, 64));
 
             int cursorScreenRow = (row - topLine) + 2;
             int blockH = n + 1; // items + footer
             int popupRow = cursorScreenRow + 1;
             if (popupRow + blockH - 1 > rows - 2) popupRow = Math.max(2, cursorScreenRow - blockH);
             int startVcol = vcol - Math.max(0, col - Math.min(suggestions.get(0).replaceFromCol, col));
-            int popupCol = Math.max(1, Math.min(gutterW + (startVcol - leftCol) + 1, cols - width + 1));
+            int popupCol = Math.max(editorX, Math.min(editorX + gutterW + (startVcol - leftCol), cols - width + 1));
 
             for (int k = 0; k < n; k++) {
                 LspDocumentSync.Completion c = suggestions.get(first + k);
@@ -1105,7 +1459,7 @@ public class Main {
 
         // Cursor shape follows the mode: bar while typing, block otherwise. Position goes last so the
         // popup drawing above can never leave the cursor inside it.
-        sb.append(ESC).append(mode == Mode.INSERT ? "[6 q" : "[2 q");
+        sb.append(ESC).append(mode == Mode.INSERT || mode == Mode.CHAT ? "[6 q" : "[2 q");
         sb.append(cursorSeq);
         sb.append(ANSI_SHOW_CURSOR);
         return sb.toString();
