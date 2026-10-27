@@ -35,16 +35,33 @@ public class Main {
     private static volatile boolean needsRedraw = true;
     private static final AtomicBoolean forceClear = new AtomicBoolean(true);
 
-    private static final TextEditor editor = new TextEditor();
     private static final HighlighterRegistry highlighterRegistry = new HighlighterRegistry();
-    private static final HighlightStateCache stateCache = new HighlightStateCache(); // Render thread only
-    private static volatile String currentFilename = "Untitled.txt";
+
+    /** One open file: its buffer, name, language server and diagnostics. Two panes may share one Doc. */
+    private static final class Doc {
+        final TextEditor editor;
+        volatile String filename;
+        volatile LspDocumentSync lsp = null;
+        volatile List<LspClient.Diagnostic> diagnostics = new ArrayList<>(); // replaced as a whole, never mutated
+        final HighlightStateCache cache = new HighlightStateCache();         // Render thread only
+
+        Doc(TextEditor editor, String filename) {
+            this.editor = editor;
+            this.filename = filename;
+        }
+    }
+
+    private static final Doc[] docs = new Doc[2]; // docs[pane]; docs[1] is only meaningful while split
+    static { docs[0] = new Doc(new TextEditor(), "Untitled.txt"); }
+
+    /** The document of the focused pane. */
+    private static Doc D() { return docs[focus]; }
+
+    private static TextEditor ed() { return docs[focus].editor; }
 
     // --- LSP (optional: null when no language server is installed for the current file) ---
-    private static volatile LspDocumentSync lsp = null;
     // Diagnostics of the open file. The list is replaced as a whole (never mutated), so the render
     // thread can read it without locking.
-    private static volatile List<LspClient.Diagnostic> diagnostics = new ArrayList<>();
 
     // 2D Cursor Coordinates (Character coordinates inside the buffer)
     private static volatile int cursorRow = 0;
@@ -52,27 +69,29 @@ public class Main {
     private static int goalCol = 0;          // Remembered column for Up/Down movement (Input thread only)
     private static boolean keepGoal = false; // Flag set by vertical moves (Input thread only)
 
-    // Viewport Boundaries (Render thread only)
-    private static int topLine = 0;
-    private static int leftCol = 0;
-
     private static final String DEFAULT_STATUS =
-            "i:insert  ::command  Tab:chat  u:undo  r:redo  F5:run  q:quit  (:help)";
+            "i:insert  ::command  Tab:switch pane  u:undo  r:redo  F5:run  q:quit  (:help)";
     private static final String HELP =
-            ":w [file]  :wq  :q  :q!  :run [args]  :compile  :lsp [stop]  :chat [clear|stop]  :set rnu|nornu  |  Tab chat  F5 run  Ctrl+S save  Ctrl+Q force-quit";
+            ":w [file]  :wq  :q  :q!  :run [args]  :compile  :lsp [stop]  :vsplit  :split  :only  :set rnu|nornu  |  Tab/Ctrl+W switch pane  F5 run  Ctrl+S save  Ctrl+Q force-quit";
 
     private static volatile String statusMessage = DEFAULT_STATUS;
     private static volatile Mode currentMode = Mode.NORMAL;
     private static final StringBuffer commandInput = new StringBuffer();
 
-    // --- Chat side panel (left), relative line numbers and git branch (status line) ---
-    private static volatile boolean chatVisible = true;
-    private static final StringBuffer chatInput = new StringBuffer();
-    private static volatile int chatScroll = 0; // lines scrolled back from the newest message
-    private static final Chat chat = new Chat(() -> needsRedraw = true);
+    // --- Relative line numbers, git branch (status line) ---
     private static volatile boolean relativeNumbers = true;
     private static volatile String gitBranch = "";
     private static int lastClockMinute = -1;    // Render thread only
+
+    // --- Split screen: two panes showing the same buffer, each with its own cursor and scroll ---
+    enum Split { NONE, VERTICAL, HORIZONTAL }
+    private static volatile Split split = Split.NONE;
+    private static volatile int focus = 0;                 // which pane owns the cursor statics (0 or 1)
+    private static final int[] savedRow = new int[2];      // cursor of the pane that is NOT focused
+    private static final int[] savedCol = new int[2];
+    private static final int[] savedGoal = new int[2];
+    private static final int[] paneTop = new int[2];       // Render thread only
+    private static final int[] paneLeft = new int[2];      // Render thread only
 
     private static volatile int termRows = 24;
     private static volatile int termCols = 80;
@@ -127,7 +146,7 @@ public class Main {
     /** @param cancelPending also drop a request still in flight, so it cannot pop up later. */
     private static void closeSuggestions(boolean cancelPending) {
         if (cancelPending) {
-            LspDocumentSync s = lsp;
+            LspDocumentSync s = D().lsp;
             if (s != null) s.cancelSuggestions();
         }
         showingSuggestions = false;
@@ -152,7 +171,7 @@ public class Main {
     private static String lastStatusSeen = "";
     private static long statusSince = System.currentTimeMillis();
 
-    enum Mode { NORMAL, INSERT, COMMAND, CHAT }
+    enum Mode { NORMAL, INSERT, COMMAND }
 
     private static PrintStream createOut() {
         try {
@@ -176,9 +195,9 @@ public class Main {
         }
 
         if (args.length > 0 && !args[0].trim().isEmpty()) {
-            currentFilename = args[0].trim();
-            statusMessage = editor.loadFromFile(currentFilename);
-            startLsp(currentFilename); // background: never delays startup
+            docs[0].filename = args[0].trim();
+            statusMessage = docs[0].editor.loadFromFile(docs[0].filename);
+            startLsp(docs[0]); // background: never delays startup
         }
         refreshGitBranch();
 
@@ -207,8 +226,7 @@ public class Main {
                 try { renderThread.join(1000); } catch (InterruptedException ignored) { Thread.currentThread().interrupt(); }
             }
             restoreTerminal(); // give the screen back first, the language server shutdown may take a moment
-            chat.close();
-            stopLsp(true);
+            stopAllLsp();
         }
     }
 
@@ -232,6 +250,8 @@ public class Main {
                     break;
                 } else if (b == 19) {                            // Ctrl+S: Save
                     saveCommand("");
+                } else if (b == 23) {                            // Ctrl+W: switch split pane
+                    switchPane();
                 } else if (b == 27) {
                     handleEscapeSequence(in);
                 } else if (b == 127 || b == 8) {
@@ -351,12 +371,10 @@ public class Main {
 
     private static void handleText(String s) {
         if (currentMode == Mode.INSERT) {
-            int[] pos = editor.insertAt(cursorRow, cursorCol, s);
+            int[] pos = ed().insertAt(cursorRow, cursorCol, s);
             cursorRow = pos[0];
             cursorCol = pos[1];
             triggerCompletion();
-        } else if (currentMode == Mode.CHAT) {
-            if (chatInput.length() < 4000) chatInput.append(s);
         } else if (currentMode == Mode.COMMAND) {
             commandInput.append(s);
         } else if (s.length() == 1) {
@@ -372,12 +390,12 @@ public class Main {
                 statusMessage = "Command mode: " + HELP;
             } else if (c == 'u') {
                 int[] pos = {cursorRow, cursorCol};
-                statusMessage = editor.undo(pos);
+                statusMessage = ed().undo(pos);
                 cursorRow = pos[0];
                 cursorCol = pos[1];
             } else if (c == 'r') {
                 int[] pos = {cursorRow, cursorCol};
-                statusMessage = editor.redo(pos);
+                statusMessage = ed().redo(pos);
                 cursorRow = pos[0];
                 cursorCol = pos[1];
             }
@@ -390,7 +408,7 @@ public class Main {
 
     /** The identifier characters immediately before the cursor ("pri" in "System.out.pri|"). */
     private static String identifierPrefix() {
-        String line = editor.getLine(cursorRow);
+        String line = ed().getLine(cursorRow);
         int end = Math.min(cursorCol, line.length());
         int start = end;
         while (start > 0 && Character.isJavaIdentifierPart(line.charAt(start - 1))) start--;
@@ -399,7 +417,7 @@ public class Main {
 
     /** True when the character before the cursor is a member-access trigger: '.', '->' or '::'. */
     private static boolean afterTriggerChar() {
-        String line = editor.getLine(cursorRow);
+        String line = ed().getLine(cursorRow);
         int end = Math.min(cursorCol, line.length());
         if (end == 0) return false;
         char c = line.charAt(end - 1);
@@ -413,14 +431,108 @@ public class Main {
 
     /** Asks the language server for completions, but only when it makes sense at the cursor. */
     private static void triggerCompletion() {
-        LspDocumentSync s = lsp;
-        if (s == null) return;
+        LspDocumentSync s = D().lsp;
         String prefix = identifierPrefix();
+        boolean useServer = lspUsable(s);
         if (prefix.isEmpty() && !afterTriggerChar()) {
-            if (showingSuggestions) closeSuggestions(); else s.cancelSuggestions();
+            if (showingSuggestions) closeSuggestions(); else if (s != null) s.cancelSuggestions();
             return;
         }
-        s.requestSuggestions(cursorRow, cursorCol, prefix, Main::showSuggestionsUi);
+        if (useServer) {
+            s.requestSuggestions(cursorRow, cursorCol, prefix, Main::showSuggestionsUi);
+        } else if (!prefix.isEmpty()) {
+            // No language server (not installed, still starting, or crashed): complete from the words
+            // already in the file plus the language's keywords.
+            showSuggestionsUi(localSuggestions(prefix));
+        } else if (showingSuggestions) {
+            closeSuggestions();
+        }
+    }
+
+    /** True when the language server is running and has finished its handshake. */
+    private static boolean lspUsable(LspDocumentSync s) {
+        if (s == null) return false;
+        LspClient c = s.client();
+        return c.isAlive() && c.ready().isDone() && !c.ready().isCompletedExceptionally();
+    }
+
+    private static final String[] JAVA_WORDS = {
+            "abstract", "boolean", "break", "byte", "case", "catch", "char", "class", "continue", "default",
+            "do", "double", "else", "enum", "extends", "final", "finally", "float", "for", "if", "implements",
+            "import", "instanceof", "int", "interface", "long", "new", "null", "package", "private",
+            "protected", "public", "return", "short", "static", "super", "switch", "this", "throw", "throws",
+            "try", "void", "volatile", "while", "String", "System", "List", "Map", "ArrayList", "HashMap"};
+    private static final String[] C_WORDS = {
+            "auto", "break", "case", "char", "const", "continue", "default", "do", "double", "else", "enum",
+            "extern", "float", "for", "goto", "if", "include", "int", "long", "namespace", "return", "short",
+            "signed", "sizeof", "static", "struct", "switch", "typedef", "union", "unsigned", "void",
+            "volatile", "while", "printf", "scanf", "malloc", "free", "std", "string", "vector", "cout", "cin"};
+    private static final String[] PY_WORDS = {
+            "and", "as", "assert", "break", "class", "continue", "def", "del", "elif", "else", "except",
+            "finally", "for", "from", "global", "if", "import", "in", "is", "lambda", "None", "not", "or",
+            "pass", "raise", "return", "self", "True", "False", "try", "while", "with", "yield", "print",
+            "range", "len", "str", "int", "list", "dict"};
+
+    private static String[] keywordsFor(String filename) {
+        CodeRunner.Language l = CodeRunner.detect(filename);
+        if (l == null) return new String[0];
+        switch (l) {
+            case JAVA: return JAVA_WORDS;
+            case C: case CPP: return C_WORDS;
+            case PYTHON: return PY_WORDS;
+            default: return new String[0];
+        }
+    }
+
+    /** Word-based completion: identifiers near the cursor and language keywords that start with {@code prefix}. */
+    private static List<LspDocumentSync.Completion> localSuggestions(String prefix) {
+        String lower = prefix.toLowerCase(java.util.Locale.ROOT);
+        java.util.Map<String, Integer> counts = new java.util.HashMap<>();
+        java.util.Map<String, Boolean> isKeyword = new java.util.HashMap<>();
+
+        // Scan a window around the cursor so a huge file doesn't make every keystroke slow.
+        int from = Math.max(0, cursorRow - 2000);
+        int to = Math.min(ed().getLineCount(), cursorRow + 2000);
+        for (String line : ed().getLines(from, to)) {
+            int n = line.length();
+            int i = 0;
+            while (i < n) {
+                if (Character.isJavaIdentifierStart(line.charAt(i))) {
+                    int j = i + 1;
+                    while (j < n && Character.isJavaIdentifierPart(line.charAt(j))) j++;
+                    String w = line.substring(i, j);
+                    if (w.length() > prefix.length() && w.toLowerCase(java.util.Locale.ROOT).startsWith(lower)) {
+                        counts.merge(w, 1, Integer::sum);
+                    }
+                    i = j;
+                } else {
+                    i++;
+                }
+            }
+        }
+        for (String k : keywordsFor(D().filename)) {
+            if (k.length() > prefix.length() && k.toLowerCase(java.util.Locale.ROOT).startsWith(lower)) {
+                counts.merge(k, 1, Integer::sum);
+                isKeyword.put(k, Boolean.TRUE);
+            }
+        }
+
+        List<String> words = new ArrayList<>(counts.keySet());
+        words.sort((a, b) -> {
+            boolean ca = a.startsWith(prefix), cb = b.startsWith(prefix); // same case as typed first
+            if (ca != cb) return ca ? -1 : 1;
+            int d = counts.get(b) - counts.get(a);                         // then the most frequent
+            return d != 0 ? d : a.compareTo(b);
+        });
+
+        List<LspDocumentSync.Completion> out = new ArrayList<>();
+        int replaceFrom = cursorCol - prefix.length();
+        for (String w : words) {
+            out.add(new LspDocumentSync.Completion(w, isKeyword.containsKey(w) ? "keyword" : "word",
+                    w, isKeyword.containsKey(w) ? 14 : 0, Math.max(0, replaceFrom)));
+            if (out.size() >= 30) break;
+        }
+        return out;
     }
 
     /** Replaces the typed prefix with the highlighted suggestion. */
@@ -432,11 +544,11 @@ public class Main {
 
         int from = Math.min(c.replaceFromCol, cursorCol);
         for (int n = cursorCol - from; n > 0; n--) {
-            int[] pos = editor.deleteAt(cursorRow, cursorCol);
+            int[] pos = ed().deleteAt(cursorRow, cursorCol);
             cursorRow = pos[0];
             cursorCol = pos[1];
         }
-        int[] pos = editor.insertAt(cursorRow, cursorCol, c.insertText);
+        int[] pos = ed().insertAt(cursorRow, cursorCol, c.insertText);
         cursorRow = pos[0];
         cursorCol = pos[1];
     }
@@ -447,8 +559,7 @@ public class Main {
     }
 
     private static void handleTab() {
-        if (currentMode == Mode.NORMAL) { enterChat(); return; }
-        if (currentMode == Mode.CHAT) { leaveChat(); return; }
+        if (currentMode == Mode.NORMAL) { switchPane(); return; }
         if (currentMode != Mode.INSERT) return;
         if (suggestionsOpen()) { // Tab accepts the highlighted suggestion
             acceptSuggestion();
@@ -462,17 +573,10 @@ public class Main {
 
     private static void handleBackspace() {
         if (currentMode == Mode.INSERT) {
-            int[] pos = editor.deleteAt(cursorRow, cursorCol);
+            int[] pos = ed().deleteAt(cursorRow, cursorCol);
             cursorRow = pos[0];
             cursorCol = pos[1];
             if (showingSuggestions) triggerCompletion(); // narrows, or closes when nothing is left to complete
-        } else if (currentMode == Mode.CHAT) {
-            int n = chatInput.length();
-            if (n > 0) {
-                int cut = n >= 2 && Character.isLowSurrogate(chatInput.charAt(n - 1))
-                        && Character.isHighSurrogate(chatInput.charAt(n - 2)) ? 2 : 1;
-                chatInput.setLength(n - cut);
-            }
         } else if (currentMode == Mode.COMMAND) {
             if (commandInput.length() > 0) {
                 commandInput.deleteCharAt(commandInput.length() - 1);
@@ -486,17 +590,17 @@ public class Main {
     private static void handleDeleteKey() {
         if (currentMode != Mode.INSERT) return;
         if (showingSuggestions) closeSuggestions();
-        int[] pos = editor.deleteForward(cursorRow, cursorCol);
+        int[] pos = ed().deleteForward(cursorRow, cursorCol);
         cursorRow = pos[0];
         cursorCol = pos[1];
     }
 
     private static void handleEnter() {
         if (currentMode == Mode.INSERT) {
-            if (showingSuggestions) closeSuggestions(); else if (lsp != null) lsp.cancelSuggestions();
+            if (showingSuggestions) closeSuggestions(); else if (D().lsp != null) D().lsp.cancelSuggestions();
 
             // Auto-indent: carry over the current line's indentation, one level deeper after an opener.
-            String before = editor.getLine(cursorRow);
+            String before = ed().getLine(cursorRow);
             before = before.substring(0, Math.min(cursorCol, before.length()));
             int ws = 0;
             while (ws < before.length() && (before.charAt(ws) == ' ' || before.charAt(ws) == '\t')) ws++;
@@ -508,11 +612,9 @@ public class Main {
                     for (int i = 0; i < TAB_WIDTH; i++) insert.append(' ');
                 }
             }
-            int[] pos = editor.insertAt(cursorRow, cursorCol, insert.toString());
+            int[] pos = ed().insertAt(cursorRow, cursorCol, insert.toString());
             cursorRow = pos[0];
             cursorCol = pos[1];
-        } else if (currentMode == Mode.CHAT) {
-            sendChat();
         } else if (currentMode == Mode.COMMAND) {
             String cmd = commandInput.toString().trim();
             commandInput.setLength(0);
@@ -534,10 +636,6 @@ public class Main {
     }
 
     private static void handleArrow(int rowDelta, int colDelta) {
-        if (currentMode == Mode.CHAT) { // Up/Down scroll the conversation (Up = older)
-            if (rowDelta != 0) chatScroll = Math.max(0, chatScroll - rowDelta);
-            return;
-        }
         if (suggestionsOpen()) {
             List<LspDocumentSync.Completion> list = activeSuggestions;
             if (list != null && rowDelta != 0) { // Up/Down move the selection
@@ -553,12 +651,12 @@ public class Main {
                 cursorCol--;
             } else if (cursorRow > 0) {
                 cursorRow--;
-                cursorCol = editor.getLineLength(cursorRow);
+                cursorCol = ed().getLineLength(cursorRow);
             }
         } else if (colDelta > 0) {
-            if (cursorCol < editor.getLineLength(cursorRow)) {
+            if (cursorCol < ed().getLineLength(cursorRow)) {
                 cursorCol++;
-            } else if (cursorRow < editor.getLineCount() - 1) {
+            } else if (cursorRow < ed().getLineCount() - 1) {
                 cursorRow++;
                 cursorCol = 0;
             }
@@ -578,11 +676,11 @@ public class Main {
 
     private static void handleEnd() {
         if (showingSuggestions) closeSuggestions();
-        if (currentMode == Mode.NORMAL || currentMode == Mode.INSERT) cursorCol = editor.getLineLength(cursorRow);
+        if (currentMode == Mode.NORMAL || currentMode == Mode.INSERT) cursorCol = ed().getLineLength(cursorRow);
     }
 
     private static void handlePage(int direction) {
-        if (currentMode == Mode.COMMAND || currentMode == Mode.CHAT) return;
+        if (currentMode == Mode.COMMAND) return;
         if (showingSuggestions) closeSuggestions();
         int step = Math.max(1, termRows - 4);
         cursorRow += direction * step;
@@ -591,9 +689,9 @@ public class Main {
     }
 
     private static void clampCursor() {
-        int maxRow = Math.max(0, editor.getLineCount() - 1);
+        int maxRow = Math.max(0, ed().getLineCount() - 1);
         cursorRow = Math.max(0, Math.min(cursorRow, maxRow));
-        cursorCol = Math.max(0, Math.min(cursorCol, editor.getLineLength(cursorRow)));
+        cursorCol = Math.max(0, Math.min(cursorCol, ed().getLineLength(cursorRow)));
     }
 
     // ------------------------------------------------------------------
@@ -601,7 +699,11 @@ public class Main {
     // ------------------------------------------------------------------
 
     private static void tryQuit() {
-        if (editor.isDirty()) {
+        if (split != Split.NONE) { // like vim: quitting a split only closes that pane
+            if (closePane(focus, false)) statusMessage = "Pane closed.";
+            return;
+        }
+        if (ed().isDirty()) {
             statusMessage = "Unsaved changes! :w to save, :wq to save+quit, :q! (or Ctrl+Q) to discard.";
         } else {
             running = false;
@@ -609,15 +711,15 @@ public class Main {
     }
 
     private static boolean saveCommand(String arg) {
-        String target = arg.isEmpty() ? currentFilename : arg;
-        String msg = editor.saveToFile(target);
+        String target = arg.isEmpty() ? D().filename : arg;
+        String msg = ed().saveToFile(target);
         statusMessage = msg;
         boolean ok = msg.startsWith("Saved");
         if (ok) {
-            boolean renamed = !target.equals(currentFilename);
-            currentFilename = target;
+            boolean renamed = !target.equals(D().filename);
+            D().filename = target;
             refreshGitBranch();
-            if (renamed) startLsp(target); // a new name can mean a different language (Untitled.txt -> a.go)
+            if (renamed) startLsp(D()); // a new name can mean a different language (Untitled.txt -> a.go)
         }
         return ok;
     }
@@ -633,31 +735,32 @@ public class Main {
 
         switch (name) {
             case "q": case "quit": case "exit": tryQuit(); break;
-            case "q!": case "quit!": running = false; break;
+            case "q!": case "quit!":
+                if (split != Split.NONE) closePane(focus, true);
+                else running = false;
+                break;
             case "w": case "write": saveCommand(arg); break;
-            case "wq": case "x": if (saveCommand(arg)) running = false; break;
+            case "wq": case "x":
+                if (saveCommand(arg)) {
+                    if (split != Split.NONE) closePane(focus, true);
+                    else running = false;
+                }
+                break;
             case "run": runCommand(true, arg); break;
             case "compile": case "build": runCommand(false, arg); break;
             case "lsp":
                 if (arg.equals("stop")) {
-                    stopLsp();
+                    stopLsp(D(), false);
                     statusMessage = "LSP stopped.";
                 } else {
-                    startLsp(currentFilename);
+                    startLsp(D());
                 }
                 break;
-            case "chat":
-                if (arg.equals("clear")) {
-                    chat.clear();
-                    chatScroll = 0;
-                    statusMessage = "Chat cleared.";
-                } else if (arg.equals("stop")) {
-                    chat.cancel();
-                    statusMessage = "Chat request cancelled.";
-                } else {
-                    chatVisible = !chatVisible;
-                    statusMessage = chatVisible ? "Chat panel shown." : "Chat panel hidden.";
-                }
+            case "split": case "sp": openSplit(Split.HORIZONTAL, arg); break;
+            case "vsplit": case "vs": case "vsp": openSplit(Split.VERTICAL, arg); break;
+            case "only": case "on":
+                if (split == Split.NONE) statusMessage = "Only one pane.";
+                else if (closePane(1 - focus, false)) statusMessage = "Single pane.";
                 break;
             case "set":
                 if (arg.equals("rnu") || arg.equals("relativenumber")) {
@@ -679,24 +782,24 @@ public class Main {
     // Language Server (LSP)
     // ------------------------------------------------------------------
 
-    /** (Re)starts the language server for `filename`. Everything slow happens on background threads. */
-    private static void startLsp(String filename) {
-        stopLsp();
-        LspDocumentSync sync = LspDocumentSync.tryStart(filename, editor, new LspClient.Listener() {
+    /** (Re)starts the language server for a document. Everything slow happens on background threads. */
+    private static void startLsp(Doc d) {
+        stopLsp(d, false);
+        LspDocumentSync sync = LspDocumentSync.tryStart(d.filename, d.editor, new LspClient.Listener() {
             @Override
             public void onDiagnostics(String uri, List<LspClient.Diagnostic> list) { // reader thread
-                LspDocumentSync s = lsp;
+                LspDocumentSync s = d.lsp;
                 if (s != null && s.isCurrent(uri)) {
-                    diagnostics = list;
+                    d.diagnostics = list;
                     needsRedraw = true;
                 }
             }
 
             @Override
             public void onExit(String reason) { // reader thread
-                LspDocumentSync s = lsp;
-                lsp = null;
-                diagnostics = new ArrayList<>();
+                LspDocumentSync s = d.lsp;
+                d.lsp = null;
+                d.diagnostics = new ArrayList<>();
                 statusMessage = "LSP server exited. :lsp to restart";
                 needsRedraw = true;
                 if (s != null) {
@@ -706,26 +809,22 @@ public class Main {
                 }
             }
         });
-        lsp = sync;
+        d.lsp = sync;
         if (sync != null) {
-            sync.open(Paths.get(filename.trim()).toAbsolutePath().normalize());
+            sync.open(Paths.get(d.filename.trim()).toAbsolutePath().normalize());
         } else {
-            statusMessage = "No language server found for '" + filename + "' (is it installed and on PATH?)";
+            statusMessage = "No language server found for '" + d.filename + "' (is it installed and on PATH?)";
         }
-    }
-
-    private static void stopLsp() {
-        stopLsp(false);
     }
 
     /**
      * Shutting a server down can take over a second, so unless we are quitting it happens on a
      * background thread and the editor never stalls.
      */
-    private static void stopLsp(boolean blocking) {
-        LspDocumentSync s = lsp;
-        lsp = null;
-        diagnostics = new ArrayList<>();
+    private static void stopLsp(Doc d, boolean blocking) {
+        LspDocumentSync s = d.lsp;
+        d.lsp = null;
+        d.diagnostics = new ArrayList<>();
         if (s == null) return;
         if (blocking) {
             s.close();
@@ -736,9 +835,15 @@ public class Main {
         }
     }
 
+    private static void stopAllLsp() {
+        Doc a = docs[0], b = docs[1];
+        if (a != null) stopLsp(a, true);
+        if (b != null && b != a) stopLsp(b, true);
+    }
+
     /** Right-hand header badge for the language server: {coloured, plain} (plain is used to measure width). */
     private static String[] lspBadge() {
-        LspDocumentSync s = lsp;
+        LspDocumentSync s = D().lsp;
         if (s == null) return new String[]{"", ""};
         if (!s.client().ready().isDone()) {
             String frame = SPINNER[(int) ((System.currentTimeMillis() / 100) % SPINNER.length)];
@@ -746,7 +851,7 @@ public class Main {
             return new String[]{fg(221) + plain + FG_DEFAULT, plain};
         }
         int errors = 0, warnings = 0;
-        for (LspClient.Diagnostic d : diagnostics) {
+        for (LspClient.Diagnostic d : D().diagnostics) {
             if (d.severity == 1) errors++;
             else if (d.severity == 2) warnings++;
         }
@@ -762,9 +867,9 @@ public class Main {
     }
 
     /** The most severe diagnostic touching `row`, or null. */
-    private static LspClient.Diagnostic bestDiagnosticAt(int row) {
+    private static LspClient.Diagnostic bestDiagnosticAt(List<LspClient.Diagnostic> diags, int row) {
         LspClient.Diagnostic best = null;
-        for (LspClient.Diagnostic d : diagnostics) {
+        for (LspClient.Diagnostic d : diags) {
             // An end position at column 0 of the next line is exclusive: it doesn't touch that line.
             int last = (d.endCol == 0 && d.endLine > d.line) ? d.endLine - 1 : d.endLine;
             if (row < d.line || row > last) continue;
@@ -779,13 +884,13 @@ public class Main {
 
     /** Saves, builds, and optionally runs the file while handing over terminal access. */
     private static void runCommand(boolean run, String argLine) {
-        String file = currentFilename;
+        String file = D().filename;
         if (CodeRunner.detect(file) == null) {
             statusMessage = "Can't " + (run ? "run" : "compile") + " '" + file + "'. Supported: "
                     + CodeRunner.supportedExtensions() + "  (rename with :w name.ext)";
             return;
         }
-        String saved = editor.saveToFile(file);
+        String saved = ed().saveToFile(file);
         if (!saved.startsWith("Saved")) {
             statusMessage = saved;
             return;
@@ -875,7 +980,7 @@ public class Main {
             }
             // Animations (LSP spinner, fading status message) only need a repaint ~10x per second.
             long now = System.nanoTime();
-            if (now - lastAnimTick > 100_000_000L && (statusFadePending || lspStarting() || chat.busy())) {
+            if (now - lastAnimTick > 100_000_000L && (statusFadePending || lspStarting())) {
                 lastAnimTick = now;
                 needsRedraw = true;
             }
@@ -890,14 +995,13 @@ public class Main {
     private static long lastAnimTick = 0;
 
     private static boolean lspStarting() {
-        LspDocumentSync s = lsp;
+        LspDocumentSync s = D().lsp;
         return s != null && !s.client().ready().isDone();
     }
 
     private static String modeHint(Mode mode) {
         switch (mode) {
             case INSERT: return "-- INSERT --  Esc:normal  Tab:accept/indent  ↑↓:choose suggestion";
-            case CHAT: return "-- CHAT --  Enter:send  Esc/Tab:editor  ↑↓:scroll  /clear  /stop";
             case COMMAND: return HELP;
             default: return DEFAULT_STATUS;
         }
@@ -907,7 +1011,6 @@ public class Main {
         switch (mode) {
             case INSERT: return 78;   // green
             case COMMAND: return 215; // orange
-            case CHAT: return 141;    // violet
             default: return 75;       // blue
         }
     }
@@ -970,7 +1073,7 @@ public class Main {
     }
 
     // ------------------------------------------------------------------
-    // Chat panel, git branch and small layout helpers
+    // Split panes, git branch and small layout helpers
     // ------------------------------------------------------------------
 
     /** One screen line under construction: ANSI-coloured text plus its visible width. */
@@ -985,68 +1088,152 @@ public class Main {
         }
     }
 
-    /** The rendered chat panel: one pre-padded string per row, plus where the text cursor goes. */
-    private static final class ChatView {
-        String[] cells;
-        int cursorRow = 0; // 0-based panel row of the input line
-        int cursorCol = 0; // 0-based panel column of the text cursor
-    }
+    // ---- Split screen ----
 
-    private static void enterChat() {
-        if (termCols < 80 || termRows < 11) {
-            statusMessage = "Terminal too small for the chat panel (needs 80x11).";
-            return;
-        }
-        chatVisible = true;
-        currentMode = Mode.CHAT;
-        statusMessage = modeHint(Mode.CHAT);
-    }
-
-    private static void leaveChat() {
-        currentMode = Mode.NORMAL;
-        statusMessage = "NORMAL MODE";
-    }
-
-    private static void sendChat() {
-        String text = chatInput.toString().trim();
-        if (text.isEmpty()) return;
-
-        if (text.startsWith("/")) { // panel commands never reach the backend
-            chatInput.setLength(0);
-            switch (text) {
-                case "/clear": chat.clear(); chatScroll = 0; statusMessage = "Chat cleared."; break;
-                case "/stop": chat.cancel(); statusMessage = "Chat request cancelled."; break;
-                default: statusMessage = "Unknown chat command: " + text + "   (/clear, /stop)";
-            }
-            return;
-        }
-        if (chat.busy()) {
-            statusMessage = "Still waiting for the previous answer. /stop cancels it.";
-            return;
-        }
-
-        // The backend gets a little context about what is open; the panel only shows what was typed.
-        Path file = null;
+    private static Path normPath(String name) {
         try {
-            file = Paths.get(currentFilename.trim()).toAbsolutePath().normalize();
-        } catch (RuntimeException ignored) { }
-        String prompt = text;
-        Path workDir = null;
-        if (file != null) {
-            prompt = "I'm editing " + file + " (cursor at line " + (cursorRow + 1) + ", column "
-                    + (cursorCol + 1) + ").\n\n" + text;
-            workDir = LspDocumentSync.findRoot(file);
+            return Paths.get(name.trim()).toAbsolutePath().normalize();
+        } catch (RuntimeException e) {
+            return null;
         }
-        chatInput.setLength(0);
-        chatScroll = 0;
-        chat.send(text, prompt, workDir);
+    }
+
+    /** A document already open in one of the panes under this file name, or null. */
+    private static Doc findOpenDoc(String name) {
+        Path want = normPath(name);
+        if (want == null) return null;
+        int n = split == Split.NONE ? 1 : 2;
+        for (int i = 0; i < n; i++) {
+            int idx = split == Split.NONE ? focus : i;
+            if (want.equals(normPath(docs[idx].filename))) return docs[idx];
+        }
+        return null;
+    }
+
+    /**
+     * :split / :vsplit. Without a file name the new pane shows the same document; with one it opens that
+     * file (or shares the document if it is already open). The new pane gets the focus.
+     */
+    private static void openSplit(Split kind, String arg) {
+        if (termCols < 40 || termRows < 10) {
+            statusMessage = "Terminal too small to split.";
+            return;
+        }
+        int other = 1 - focus;
+        Doc target;
+        boolean fresh = false;
+        String loadMsg = null;
+        if (arg.isEmpty()) {
+            target = D();
+        } else {
+            target = findOpenDoc(arg);
+            if (target == null) {
+                TextEditor e = new TextEditor();
+                loadMsg = e.loadFromFile(arg);
+                if (loadMsg.startsWith("Error")) {
+                    statusMessage = loadMsg;
+                    return;
+                }
+                target = new Doc(e, arg.trim());
+                fresh = true;
+            }
+        }
+
+        if (split != Split.NONE) {
+            if (arg.isEmpty()) { // only the layout changes
+                split = kind;
+                forceClear.set(true);
+                statusMessage = (kind == Split.VERTICAL ? "Vertical" : "Horizontal") + " split.";
+                return;
+            }
+            Doc old = docs[other];
+            boolean shared = old == docs[focus];
+            if (!shared && old.editor.isDirty()) {
+                statusMessage = "The other pane has unsaved changes. Save it there or close it with :q!";
+                return;
+            }
+            if (!shared && old != target) stopLsp(old, false);
+        }
+
+        docs[other] = target;
+        if (target == D()) { // same document: the new pane starts at the current position
+            savedRow[other] = cursorRow;
+            savedCol[other] = cursorCol;
+            savedGoal[other] = goalCol;
+            paneTop[other] = paneTop[focus];
+            paneLeft[other] = paneLeft[focus];
+        } else {
+            savedRow[other] = 0;
+            savedCol[other] = 0;
+            savedGoal[other] = 0;
+            paneTop[other] = 0;
+            paneLeft[other] = 0;
+        }
+        split = kind;
+        forceClear.set(true);
+        switchPane(); // the new pane gets the focus
+        if (fresh) {
+            startLsp(target);
+            statusMessage = loadMsg;
+        } else {
+            statusMessage = (kind == Split.VERTICAL ? "Vertical" : "Horizontal") + " split. Tab/Ctrl+W switch pane, :q closes it.";
+        }
+    }
+
+    /** Gives the cursor to the other pane. */
+    private static void switchPane() {
+        if (split == Split.NONE) return;
+        if (showingSuggestions) closeSuggestions();
+        int cur = focus;
+        int other = 1 - cur;
+        int row = cursorRow, col = cursorCol, goal = goalCol;
+        cursorRow = savedRow[other];
+        cursorCol = savedCol[other];
+        goalCol = savedGoal[other];
+        savedRow[cur] = row;
+        savedCol[cur] = col;
+        savedGoal[cur] = goal;
+        focus = other;
+        keepGoal = true;
+        refreshGitBranch();
+    }
+
+    /**
+     * Closes pane {@code idx}; the other pane stays. Refuses when the pane holds the only copy of a
+     * document with unsaved changes, unless {@code force}.
+     */
+    private static boolean closePane(int idx, boolean force) {
+        if (split == Split.NONE) return false;
+        int other = 1 - idx;
+        Doc gone = docs[idx];
+        boolean shared = docs[other] == gone;
+        if (!shared && gone.editor.isDirty() && !force) {
+            statusMessage = "Unsaved changes in this pane! :w to save, :q! to discard.";
+            return false;
+        }
+        if (showingSuggestions) closeSuggestions();
+        if (focus == idx) { // hand the cursor to the surviving pane
+            cursorRow = savedRow[other];
+            cursorCol = savedCol[other];
+            goalCol = savedGoal[other];
+            keepGoal = true;
+        }
+        docs[0] = docs[other];
+        paneTop[0] = paneTop[other];
+        paneLeft[0] = paneLeft[other];
+        focus = 0;
+        split = Split.NONE;
+        if (!shared) stopLsp(gone, false);
+        forceClear.set(true);
+        refreshGitBranch();
+        return true;
     }
 
     /** Reads the current git branch (or short commit id) by looking for .git/HEAD above the open file. */
     private static void refreshGitBranch() {
         String result = "";
         try {
-            Path file = Paths.get(currentFilename.trim()).toAbsolutePath().normalize();
+            Path file = Paths.get(D().filename.trim()).toAbsolutePath().normalize();
             for (Path p = file.getParent(); p != null; p = p.getParent()) {
                 Path head = p.resolve(".git").resolve("HEAD");
                 if (Files.isRegularFile(head)) {
@@ -1062,7 +1249,7 @@ public class Main {
 
     private static int[] diagCounts() {
         int errors = 0, warnings = 0;
-        for (LspClient.Diagnostic d : diagnostics) {
+        for (LspClient.Diagnostic d : D().diagnostics) {
             if (d.severity == 1) errors++;
             else if (d.severity == 2) warnings++;
         }
@@ -1085,115 +1272,6 @@ public class Main {
         return slash >= 0 ? path.substring(slash + 1) : path;
     }
 
-    private static String shortDir() {
-        String dir = System.getProperty("user.dir", ".");
-        String home = System.getProperty("user.home", "");
-        if (!home.isEmpty() && dir.startsWith(home)) dir = "~" + dir.substring(home.length());
-        return dir;
-    }
-
-    /** A Line cut or padded to exactly `width` cells. */
-    private static String cell(Line l, int width) {
-        String s = sliceAnsi(l.colored.toString(), 0, width);
-        return s + spaces(width - Math.min(l.len, width)) + ANSI_RESET;
-    }
-
-    /** Word-wraps text to `width` columns, keeping explicit line breaks. */
-    private static List<String> wrap(String text, int width) {
-        List<String> out = new ArrayList<>();
-        if (width < 1) return out;
-        for (String raw : text.split("\n", -1)) { // split first: sanitize() would turn '\n' into '·'
-            String para = sanitize(raw);
-            if (para.isEmpty()) {
-                out.add("");
-                continue;
-            }
-            int i = 0;
-            while (i < para.length()) {
-                int end = Math.min(para.length(), i + width);
-                boolean brokeAtSpace = false;
-                if (end < para.length()) {
-                    int sp = para.lastIndexOf(' ', end);
-                    if (sp > i) {
-                        end = sp;
-                        brokeAtSpace = true;
-                    } else if (end > i + 1 && Character.isLowSurrogate(para.charAt(end))) {
-                        end--; // never split a surrogate pair
-                    }
-                }
-                out.add(para.substring(i, end).stripTrailing());
-                i = end;
-                if (brokeAtSpace) while (i < para.length() && para.charAt(i) == ' ') i++;
-            }
-        }
-        return out;
-    }
-
-    /**
-     * Lays out the chat panel: header, conversation (newest at the bottom, scrollable), a rule,
-     * the input line and a hint line. Every returned row is exactly `w` cells wide.
-     */
-    private static ChatView buildChatPanel(int w, int h, boolean focused, long now) {
-        ChatView v = new ChatView();
-        v.cells = new String[h];
-        Line blank = new Line();
-        int inner = Math.max(1, w - 2);
-        int msgRows = h - 5;
-
-        Line head = new Line();
-        head.add(fg(141) + BOLD, " MAGHRABY ").add(fg(60) + BOLD_OFF, "/// ")
-                .add(fg(245), clip(shortDir() + " · " + Chat.backendLabel(), w - 15));
-        v.cells[0] = cell(head, w);
-        v.cells[1] = cell(blank, w);
-
-        List<Line> all = new ArrayList<>();
-        for (Chat.Message m : chat.messages()) {
-            if (m.role == Chat.Role.USER) {
-                for (String l : wrap(m.text, w - 4)) {
-                    all.add(new Line().add(fg(141) + BOLD_OFF, " │ ").add(fg(252), l));
-                }
-            } else {
-                String color = m.role == Chat.Role.ERROR ? fg(203) : fg(252);
-                for (String l : wrap(m.text, inner)) all.add(new Line().add(color, " " + l));
-                if (!m.meta.isEmpty()) {
-                    all.add(new Line());
-                    all.add(new Line().add(fg(240), " " + clip(m.meta, inner)));
-                }
-            }
-            all.add(new Line());
-        }
-        if (chat.busy()) {
-            String frame = SPINNER[(int) ((now / 100) % SPINNER.length)];
-            long secs = Math.max(0, (now - chat.busySince()) / 1000);
-            all.add(new Line().add(fg(221), " " + frame + " Thinking… " + secs + "s"));
-        }
-
-        int total = all.size();
-        int scroll = Math.min(chatScroll, Math.max(0, total - msgRows));
-        if (scroll != chatScroll) chatScroll = scroll; // the user scrolled past the oldest line
-        int start = Math.max(0, total - msgRows - scroll);
-        for (int k = 0; k < msgRows; k++) {
-            int idx = start + k;
-            v.cells[2 + k] = cell(idx < total ? all.get(idx) : blank, w);
-        }
-
-        v.cells[h - 3] = cell(new Line().add(focused ? fg(141) : fg(238), " " + repeat("─", inner)), w);
-
-        String typed = sanitize(chatInput.toString().replace('\n', ' '));
-        int avail = Math.max(1, inner - 2);
-        String shown = typed.length() > avail ? typed.substring(typed.length() - avail) : typed;
-        Line in = new Line().add(fg(78) + BOLD, " ❯ ");
-        if (typed.isEmpty()) in.add(fg(240) + BOLD_OFF, "Ready...");
-        else in.add(fg(252) + BOLD_OFF, shown);
-        v.cells[h - 2] = cell(in, w);
-        v.cursorRow = h - 2;
-        v.cursorCol = 3 + shown.length();
-
-        String hint = focused ? "enter send · esc back · ↑↓ scroll · /clear" : "tab focus chat · :chat hide · /clear";
-        v.cells[h - 1] = cell(new Line().add(fg(240), " " + clip(hint, inner)), w);
-        return v;
-    }
-
     /** Right-hand side of the status line. `full` adds diagnostics and the scroll percentage. */
     private static Line statusRight(boolean full, int[] dc, int pct, String pos, String clock) {
         Line r = new Line();
@@ -1206,6 +1284,92 @@ public class Main {
         r.add(bg(213) + fg(16) + BOLD, " " + clock + " ");
         r.add(BOLD_OFF, "");
         return r;
+    }
+
+    /**
+     * Draws one pane (gutter + highlighted text) of a document at screen position (x, y), 1-based,
+     * and scrolls it so its cursor is visible. Returns {visual cursor column, gutter width, clamped column}.
+     */
+    private static int[] drawPane(StringBuilder sb, int idx, Doc doc, int x, int y, int w, int h, int row, int col,
+                                  boolean active, boolean eraseEol) {
+        if (h <= 0 || w <= 0) return new int[]{0, 0, col};
+
+        TextEditor ed = doc.editor;
+        int lineCount = ed.getLineCount();
+        row = Math.max(0, Math.min(row, lineCount - 1));
+        SyntaxHighlighter highlighter = highlighterRegistry.forFileName(doc.filename);
+        doc.cache.useHighlighter(highlighter);
+        List<LspClient.Diagnostic> diags = doc.diagnostics;
+
+        int digits = String.valueOf(lineCount).length();
+        int gutterW = digits + 3;                   // marker + number + space + separator
+        if (w - gutterW < 10) gutterW = 0;          // pathological narrow pane: drop the gutter
+        int textCols = w - gutterW;
+
+        // Vertical scroll
+        int top = paneTop[idx];
+        if (row < top) top = row;
+        else if (row >= top + h) top = row - h + 1;
+        top = Math.max(0, Math.min(top, Math.max(0, lineCount - 1)));
+
+        // Only the visible lines are read; everything above is summarized by the highlight-state cache.
+        List<String> visible = ed.getLines(top, top + h);
+        String cursorLineText = (row >= top && row - top < visible.size())
+                ? visible.get(row - top) : ed.getLine(row);
+        col = Math.max(0, Math.min(col, cursorLineText.length()));
+
+        // Horizontal scroll
+        int left = paneLeft[idx];
+        int vcol = visualCol(cursorLineText, col);
+        if (vcol < left) left = vcol;
+        else if (vcol >= left + textCols) left = vcol - textCols + 1;
+        left = Math.max(0, left);
+        paneTop[idx] = top;
+        paneLeft[idx] = left;
+
+        HighlightState state = doc.cache.stateAt(top, ed::getLines);
+        boolean rel = relativeNumbers;
+        int markColor = active ? 220 : 245;
+
+        for (int i = 0; i < h; i++) {
+            sb.append(ESC).append('[').append(y + i).append(';').append(x).append('H');
+            int lineIdx = top + i;
+            if (i >= visible.size()) {
+                if (gutterW > 0) sb.append(fg(61)).append('~').append(ANSI_RESET);
+                if (eraseEol) sb.append(ESC).append("[K");
+                else sb.append(spaces(w - (gutterW > 0 ? 1 : 0)));
+                continue;
+            }
+            if (gutterW > 0) {
+                boolean current = lineIdx == row;
+                LspClient.Diagnostic d = bestDiagnosticAt(diags, lineIdx);
+                if (d != null) {
+                    sb.append(fg(severityColor(d.severity))).append(d.severity == 1 ? "●" : d.severity == 2 ? "▲" : "•");
+                } else if (current) {
+                    sb.append(fg(markColor)).append('›');
+                } else {
+                    sb.append(' ');
+                }
+                // Relative numbering: the cursor line shows its real number (left aligned), the
+                // others show their distance from it.
+                String num = (current || !rel) ? String.valueOf(lineIdx + 1) : String.valueOf(Math.abs(lineIdx - row));
+                String pad = spaces(digits - num.length());
+                sb.append(current ? fg(markColor) + BOLD : fg(241))
+                        .append(current && rel ? num + pad : pad + num).append(ANSI_RESET)
+                        .append(' ').append(current ? fg(markColor) : fg(238)).append('│').append(ANSI_RESET);
+            }
+            String display = expandTabsAndSanitize(visible.get(i));
+            HighlightResult hr = highlighter.highlightLine(display, state);
+            state = hr.nextState;
+            sb.append(sliceAnsi(hr.coloredLine, left, textCols));
+            if (eraseEol) {
+                sb.append(ESC).append("[K");
+            } else {
+                int printed = Math.max(0, Math.min(textCols, display.length() - left));
+                sb.append(spaces(textCols - printed));
+            }
+        }
+        return new int[]{vcol, gutterW, col};
     }
 
     private static String buildFrame() {
@@ -1224,7 +1388,10 @@ public class Main {
         Mode mode = currentMode;
         String status = statusMessage;
         String command = commandInput.toString();
-        String filename = currentFilename;
+        Split sp = split;
+        int fo = focus;
+        Doc ad = docs[fo]; // document of the focused pane
+        String filename = ad.filename;
         List<LspDocumentSync.Completion> suggestions = showingSuggestions ? activeSuggestions : null;
         int selected = suggestionIndex;
         int row = cursorRow;
@@ -1232,108 +1399,81 @@ public class Main {
         int textRows = rows - 3; // rows 2 .. rows-2: between the tab line and the status line
         long now = System.currentTimeMillis();
 
-        // --- Split layout: chat panel on the left, editor on the right ---
-        int chatW = (chatVisible && cols >= 80 && textRows >= 8)
-                ? Math.min(Math.max(30, cols * 2 / 5), cols - 31) : 0;
-        if (mode == Mode.CHAT && chatW == 0) { // the terminal shrank below what the panel needs
-            currentMode = Mode.NORMAL;
-            mode = Mode.NORMAL;
-        }
-        int editorX = chatW > 0 ? chatW + 2 : 1;   // 1-based screen column of the editor's first cell
-        int editorCols = cols - (editorX - 1);
-
         // Tell the highlight-state cache which lines were edited since the previous frame. Done before
         // reading any text: an edit that sneaks in later is reported again and fixed on the next frame.
-        int dirtyFrom = editor.takeDirtyFromLine();
-        if (dirtyFrom != Integer.MAX_VALUE) stateCache.invalidateFrom(dirtyFrom);
+        int paneCount = sp == Split.NONE ? 1 : 2;
+        for (int i = 0; i < paneCount; i++) {
+            if (i == 1 && docs[1] == docs[0]) break; // same document in both panes: one report is enough
+            int dirtyFrom = docs[i].editor.takeDirtyFromLine();
+            if (dirtyFrom != Integer.MAX_VALUE) docs[i].cache.invalidateFrom(dirtyFrom);
+        }
 
-        int lineCount = editor.getLineCount();
+        int lineCount = ad.editor.getLineCount();
         row = Math.max(0, Math.min(row, lineCount - 1));
 
-        // --- Gutter geometry ---
-        int digits = String.valueOf(lineCount).length();
-        int gutterW = digits + 3;                 // marker + number + space + separator
-        if (editorCols - gutterW < 10) gutterW = 0; // pathological narrow editor: drop the gutter
-        int textCols = editorCols - gutterW;
-
-        // --- Viewport Calculation (Vertical) ---
-        if (row < topLine) topLine = row;
-        else if (row >= topLine + textRows) topLine = row - textRows + 1;
-        topLine = Math.max(0, Math.min(topLine, Math.max(0, lineCount - 1)));
-
-        // Only the visible lines are read; everything above is summarized by the highlight-state cache.
-        List<String> visible = editor.getLines(topLine, topLine + textRows);
-        String cursorLineText = (row >= topLine && row - topLine < visible.size())
-                ? visible.get(row - topLine) : editor.getLine(row);
-        col = Math.max(0, Math.min(col, cursorLineText.length()));
-
-        // --- Viewport Calculation (Horizontal) ---
-        int vcol = visualCol(cursorLineText, col);
-        if (vcol < leftCol) leftCol = vcol;
-        else if (vcol >= leftCol + textCols) leftCol = vcol - textCols + 1;
-        leftCol = Math.max(0, leftCol);
+        // --- Pane layout: one pane, or two side by side / stacked ---
+        int[] px = {1, 1}, py = {2, 2}, pw = {cols, cols}, ph = {textRows, textRows};
+        if (sp == Split.VERTICAL) {
+            int wl = (cols - 1) / 2;
+            pw[0] = wl;
+            px[1] = wl + 2;
+            pw[1] = cols - wl - 1;
+        } else if (sp == Split.HORIZONTAL) {
+            int ht = (textRows - 1) / 2;
+            ph[0] = ht;
+            py[1] = 2 + ht + 1;
+            ph[1] = textRows - ht - 1;
+        }
 
         // --- Tab line (row 1): the open file as a tab, LSP badge on the right ---
         int[] dc = diagCounts();
-        String tabName = clip(sanitize(baseName(filename)), Math.max(8, cols / 3));
         Line tab = new Line();
-        tab.add(bg(237) + fg(141) + BOLD, " ▎").add(fg(255), " " + tabName).add(BOLD_OFF, "");
-        if (editor.isDirty()) tab.add(fg(214), " ●");
-        if (dc[0] > 0) tab.add(fg(203), " ✖ " + dc[0]);
-        if (dc[1] > 0) tab.add(fg(214), " ▲ " + dc[1]);
-        tab.add(bg(237), " ").add(bg(234) + fg(240), "  + ");
+        boolean twoFiles = paneCount == 2 && docs[0] != docs[1];
+        int tabMax = Math.max(8, cols / (twoFiles ? 5 : 3));
+        for (int i = 0; i < (twoFiles ? 2 : 1); i++) {
+            Doc td = twoFiles ? docs[i] : ad;
+            boolean act = twoFiles ? i == fo : true;
+            tab.add(bg(237) + (act ? fg(141) : fg(240)) + BOLD, " ▎")
+                    .add(act ? fg(255) : fg(245), " " + clip(sanitize(baseName(td.filename)), tabMax)).add(BOLD_OFF, "");
+            if (td.editor.isDirty()) tab.add(fg(214), " ●");
+            if (act && dc[0] > 0) tab.add(fg(203), " ✖ " + dc[0]);
+            if (act && dc[1] > 0) tab.add(fg(214), " ▲ " + dc[1]);
+            tab.add(bg(237), " ");
+        }
+        tab.add(bg(234) + fg(240), "  + ");
         String[] badge = lspBadge();
         sb.append(ESC).append("[1;1H")
                 .append(bar(tab.colored.toString(), tab.len, badge[0], badge[1].length(), cols, bg(234)));
 
-        // --- Body: chat panel | editor ---
-        ChatView chatView = chatW > 0 ? buildChatPanel(chatW, textRows, mode == Mode.CHAT, now) : null;
-
-        SyntaxHighlighter highlighter = highlighterRegistry.forFileName(filename);
-
-        // Highlighter state at the top of the screen (multi-line comments / docstrings opened above it).
-        // The cache only scans lines it has not seen yet, instead of lines 0..topLine on every frame.
-        stateCache.useHighlighter(highlighter);
-        HighlightState state = stateCache.stateAt(topLine, editor::getLines);
-
-        boolean rel = relativeNumbers;
-        for (int i = 0; i < textRows; i++) {
-            sb.append(ESC).append('[').append(i + 2).append(";1H");
-            if (chatView != null) {
-                sb.append(chatView.cells[i])
-                        .append(fg(mode == Mode.CHAT ? 141 : 238)).append('│').append(ANSI_RESET);
-            }
-            int lineIdx = topLine + i;
-            if (gutterW > 0) {
-                if (i < visible.size()) {
-                    boolean current = lineIdx == row;
-                    LspClient.Diagnostic d = bestDiagnosticAt(lineIdx);
-                    if (d != null) {
-                        sb.append(fg(severityColor(d.severity))).append(d.severity == 1 ? "●" : d.severity == 2 ? "▲" : "•");
-                    } else if (current) {
-                        sb.append(fg(220)).append('›');
-                    } else {
-                        sb.append(' ');
-                    }
-                    // Relative numbering: the cursor line shows its real number (left aligned), the
-                    // others show their distance from it.
-                    String num = (current || !rel) ? String.valueOf(lineIdx + 1) : String.valueOf(Math.abs(lineIdx - row));
-                    String pad = spaces(digits - num.length());
-                    sb.append(current ? fg(220) + BOLD : fg(241))
-                            .append(current && rel ? num + pad : pad + num).append(ANSI_RESET)
-                            .append(' ').append(current ? fg(220) : fg(238)).append('│').append(ANSI_RESET);
-                } else {
-                    sb.append(fg(61)).append('~').append(ANSI_RESET);
-                }
-            }
-            if (i < visible.size()) {
-                String display = expandTabsAndSanitize(visible.get(i));
-                HighlightResult hr = highlighter.highlightLine(display, state);
-                state = hr.nextState;
-                sb.append(sliceAnsi(hr.coloredLine, leftCol, textCols));
-            }
-            sb.append(ESC).append("[K"); // erase the rest of the row; the chat panel is to the left
+        // --- Body: one or two panes ---
+        int[] activeInfo = {0, 0, col}; // {visual column, gutter width, clamped column} of the focused pane
+        for (int i = 0; i < paneCount; i++) {
+            boolean active = i == fo;
+            Doc pd = docs[i];
+            int r = active ? row : Math.max(0, Math.min(savedRow[i], pd.editor.getLineCount() - 1));
+            int c = active ? col : savedCol[i];
+            boolean eraseEol = px[i] + pw[i] - 1 >= cols; // the pane touches the right edge of the screen
+            int[] info = drawPane(sb, i, pd, px[i], py[i], pw[i], ph[i], r, c, active, eraseEol);
+            if (active) activeInfo = info;
         }
+        if (sp == Split.VERTICAL) {
+            sb.append(fg(238));
+            for (int k = 0; k < textRows; k++) {
+                sb.append(ESC).append('[').append(2 + k).append(';').append(pw[0] + 1).append('H').append('│');
+            }
+            sb.append(ANSI_RESET);
+        } else if (sp == Split.HORIZONTAL) {
+            sb.append(ESC).append('[').append(py[0] + ph[0]).append(";1H").append(fg(238))
+                    .append(repeat("─", cols)).append(ANSI_RESET);
+        }
+        int editorX = px[fo];
+        int editorCols = pw[fo];
+        int paneY = py[fo];
+        int vcol = activeInfo[0];
+        int gutterW = activeInfo[1];
+        col = activeInfo[2];
+        int topLine = paneTop[fo];
+        int leftCol = paneLeft[fo];
 
         // --- Status line (second to last row): mode | branch | file ╱╱╱╱ diagnostics % row:col clock ---
         String hint = modeHint(mode);
@@ -1358,7 +1498,7 @@ public class Main {
         left.add(bg(mc) + fg(16) + BOLD, " " + mode + " ");
         if (!branch.isEmpty()) left.add(BOLD_OFF + bg(237) + fg(150), " " + clip(sanitize(branch), 24) + " ");
         left.add(BOLD_OFF + bg(235) + fg(252),
-                " " + clip(sanitize(baseName(filename)), Math.max(8, cols / 3)) + (editor.isDirty() ? " ●" : "") + " ");
+                " " + clip(sanitize(baseName(filename)), Math.max(8, cols / 3)) + (ed().isDirty() ? " ●" : "") + " ");
 
         String posText = (row + 1) + ":" + (col + 1);
         Line right = statusRight(true, dc, pct, posText, clock);
@@ -1383,7 +1523,7 @@ public class Main {
             cursorSeq = ESC + "[" + rows + ";" + Math.min(shown.length() + 1, cols) + "H";
         } else {
             boolean isHint = shownStatus.equals(hint) || shownStatus.equals(DEFAULT_STATUS);
-            LspClient.Diagnostic d = bestDiagnosticAt(row);
+            LspClient.Diagnostic d = bestDiagnosticAt(ad.diagnostics, row);
             String text;
             String color;
             if (!isHint) {
@@ -1401,14 +1541,10 @@ public class Main {
             if (text.length() > cols - 1) text = text.substring(0, cols - 1);
             sb.append(color).append(sanitize(text)).append(ANSI_RESET);
 
-            if (mode == Mode.CHAT && chatView != null) {
-                cursorSeq = ESC + "[" + (2 + chatView.cursorRow) + ";" + Math.min(chatView.cursorCol + 1, chatW) + "H";
-            } else {
-                int screenRow = (row - topLine) + 2;
-                int screenCol = editorX + gutterW + (vcol - leftCol);
-                cursorSeq = ESC + "[" + Math.max(2, Math.min(screenRow, rows - 2)) + ";"
-                        + Math.max(editorX, Math.min(screenCol, cols)) + "H";
-            }
+            int screenRow = (row - topLine) + paneY;
+            int screenCol = editorX + gutterW + (vcol - leftCol);
+            cursorSeq = ESC + "[" + Math.max(paneY, Math.min(screenRow, rows - 2)) + ";"
+                    + Math.max(editorX, Math.min(screenCol, cols)) + "H";
         }
 
         // --- Suggestions popup (drawn last so it floats above the text) ---
@@ -1426,7 +1562,7 @@ public class Main {
             }
             width = Math.min(width, Math.min(editorCols, 64));
 
-            int cursorScreenRow = (row - topLine) + 2;
+            int cursorScreenRow = (row - topLine) + paneY;
             int blockH = n + 1; // items + footer
             int popupRow = cursorScreenRow + 1;
             if (popupRow + blockH - 1 > rows - 2) popupRow = Math.max(2, cursorScreenRow - blockH);
@@ -1459,7 +1595,7 @@ public class Main {
 
         // Cursor shape follows the mode: bar while typing, block otherwise. Position goes last so the
         // popup drawing above can never leave the cursor inside it.
-        sb.append(ESC).append(mode == Mode.INSERT || mode == Mode.CHAT ? "[6 q" : "[2 q");
+        sb.append(ESC).append(mode == Mode.INSERT ? "[6 q" : "[2 q");
         sb.append(cursorSeq);
         sb.append(ANSI_SHOW_CURSOR);
         return sb.toString();
