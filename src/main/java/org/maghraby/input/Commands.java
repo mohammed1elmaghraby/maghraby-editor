@@ -103,9 +103,34 @@ public final class Commands {
                     statusMessage = "Unknown option: " + arg + "   (rnu, nornu)";
                 }
                 break;
+            case "goto": case "go": case "g": gotoLine(arg); break;
             case "help": case "h": statusMessage = HELP; break;
-            default: statusMessage = "Unknown command: " + cmdLine + "   (try :help)";
+            default:
+                // vim style: ":584" or ":$" jumps straight to a line
+                if (name.equals("$") || name.matches("\\d+")) gotoLine(name);
+                else statusMessage = "Unknown command: " + cmdLine + "   (try :help)";
         }
+    }
+
+    /** Moves the cursor to a 1-based line number ("$" = last line). Out-of-range numbers are clamped. */
+    public static void gotoLine(String arg) {
+        int count = ed().getLineCount();
+        int target;
+        if (arg.equals("$")) {
+            target = count;
+        } else {
+            try {
+                target = Integer.parseInt(arg.trim());
+            } catch (NumberFormatException e) {
+                statusMessage = "Usage: :<line>  or  :goto <line>  (:$ = last line)";
+                return;
+            }
+        }
+        int line = Math.max(1, Math.min(target, count));
+        cursorRow = line - 1;
+        cursorCol = 0;
+        goalCol = 0;
+        statusMessage = line == target ? "Line " + line : "Line " + line + " (last line is " + count + ")";
     }
 
     /** Saves, builds, and optionally runs the file while handing over terminal access. */
