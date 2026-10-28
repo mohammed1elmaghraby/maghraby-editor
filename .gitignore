@@ -29,4 +29,5 @@ EditorBenchmark.java
 Thumbs.db
 test
 test.cpp
-*.out
+*.out.factorypath
+.factorypath

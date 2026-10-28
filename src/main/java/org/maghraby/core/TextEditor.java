@@ -1,5 +1,6 @@
-package org.maghraby;
+package org.maghraby.core;
 
+import org.maghraby.input.EditListener;
 import org.maghraby.ds.EditAction;
 import org.maghraby.ds.MyStack;
 

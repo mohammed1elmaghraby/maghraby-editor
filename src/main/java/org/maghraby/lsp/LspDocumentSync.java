@@ -1,4 +1,9 @@
-package org.maghraby;
+package org.maghraby.lsp;
+
+import org.maghraby.util.Json;
+import org.maghraby.lsp.LspServers;
+import org.maghraby.core.TextEditor;
+import org.maghraby.input.EditListener;
 
 import java.io.IOException;
 import java.nio.file.Files;
@@ -242,7 +247,7 @@ public final class LspDocumentSync implements EditListener, AutoCloseable {
     // ------------------------------------------------------------------
 
     /** Nearest ancestor containing a project marker (go.mod, .git, pom.xml...), else the file's folder. */
-    static Path findRoot(Path file) {
+    public static Path findRoot(Path file) {
         Path dir = file.getParent();
         for (Path p = dir; p != null; p = p.getParent()) {
             for (String marker : ROOT_MARKERS) {
@@ -264,7 +269,7 @@ public final class LspDocumentSync implements EditListener, AutoCloseable {
         public final int kind;          // LSP CompletionItemKind (1..25), 0 = unknown
         public final int replaceFromCol; // column on the cursor line where the replacement starts
 
-        Completion(String label, String detail, String insertText, int kind, int replaceFromCol) {
+        public Completion(String label, String detail, String insertText, int kind, int replaceFromCol) {
             this.label = label;
             this.detail = detail;
             this.insertText = insertText;

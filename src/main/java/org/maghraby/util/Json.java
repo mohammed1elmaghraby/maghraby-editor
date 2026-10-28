@@ -1,4 +1,4 @@
-package org.maghraby;
+package org.maghraby.util;
 
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -11,7 +11,7 @@ import java.util.Map;
  * Parsed values are: Map&lt;String,Object&gt;, List&lt;Object&gt;, String, Long, Double, Boolean or null.
  * Writing accepts the same types (plus any Number).
  */
-final class Json {
+public final class Json {
     private Json() {}
 
     // ------------------------------------------------------------------
@@ -19,33 +19,33 @@ final class Json {
     // ------------------------------------------------------------------
 
     /** obj("a", 1, "b", "x") -> {"a":1,"b":"x"} (insertion ordered). */
-    static Map<String, Object> obj(Object... keyValues) {
+    public static Map<String, Object> obj(Object... keyValues) {
         Map<String, Object> m = new LinkedHashMap<>();
         for (int i = 0; i + 1 < keyValues.length; i += 2) m.put((String) keyValues[i], keyValues[i + 1]);
         return m;
     }
 
-    static List<Object> list(Object... items) {
+    public static List<Object> list(Object... items) {
         List<Object> l = new ArrayList<>(items.length);
         for (Object o : items) l.add(o);
         return l;
     }
 
     @SuppressWarnings("unchecked")
-    static Map<String, Object> asMap(Object o) {
+    public static Map<String, Object> asMap(Object o) {
         return o instanceof Map ? (Map<String, Object>) o : null;
     }
 
     @SuppressWarnings("unchecked")
-    static List<Object> asList(Object o) {
+    public static List<Object> asList(Object o) {
         return o instanceof List ? (List<Object>) o : null;
     }
 
-    static String asString(Object o) {
+    public static String asString(Object o) {
         return o instanceof String ? (String) o : null;
     }
 
-    static int asInt(Object o, int fallback) {
+    public static int asInt(Object o, int fallback) {
         return o instanceof Number ? ((Number) o).intValue() : fallback;
     }
 
@@ -53,7 +53,7 @@ final class Json {
     // Writer
     // ------------------------------------------------------------------
 
-    static String write(Object value) {
+    public static String write(Object value) {
         StringBuilder sb = new StringBuilder(128);
         write(sb, value);
         return sb.toString();
@@ -121,7 +121,7 @@ final class Json {
     // Parser
     // ------------------------------------------------------------------
 
-    static Object parse(String text) {
+    public static Object parse(String text) {
         Parser p = new Parser(text);
         p.skipWs();
         Object v = p.value();

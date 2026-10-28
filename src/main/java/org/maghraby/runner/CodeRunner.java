@@ -1,4 +1,4 @@
-package org.maghraby;
+package org.maghraby.runner;
 
 import java.io.File;
 import java.io.IOException;
@@ -315,7 +315,7 @@ public final class CodeRunner {
     }
 
     /** Finds the first available tool on the system PATH. */
-    static String findTool(String... names) {
+    public static String findTool(String... names) {
         List<File> dirs = new ArrayList<>();
         String path = System.getenv("PATH");
         if (path != null) {

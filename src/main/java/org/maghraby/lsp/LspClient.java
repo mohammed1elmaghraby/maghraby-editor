@@ -1,4 +1,6 @@
-package org.maghraby;
+package org.maghraby.lsp;
+
+import org.maghraby.util.Json;
 
 import java.io.BufferedInputStream;
 import java.io.ByteArrayOutputStream;

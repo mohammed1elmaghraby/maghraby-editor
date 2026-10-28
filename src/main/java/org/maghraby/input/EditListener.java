@@ -1,4 +1,4 @@
-package org.maghraby;
+package org.maghraby.input;
 
 /**
  * Receives every document mutation as an LSP-style range, expressed in the coordinates that were
@@ -8,7 +8,7 @@ package org.maghraby;
  * Called while the editor's monitor is held, so implementations must only enqueue (never block,
  * never call back into the editor).
  */
-interface EditListener {
+public interface EditListener {
     void onInsert(int line, int col, String text);
 
     void onDelete(int startLine, int startCol, int endLine, int endCol);

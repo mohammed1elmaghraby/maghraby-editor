@@ -1,4 +1,4 @@
-package org.maghraby;
+package org.maghraby.core;
 
 enum BufferType { ORIGINAL, ADD }
 

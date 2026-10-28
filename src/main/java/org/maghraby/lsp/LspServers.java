@@ -1,4 +1,6 @@
-package org.maghraby;
+package org.maghraby.lsp;
+
+import org.maghraby.runner.CodeRunner;
 
 import java.io.File;
 import java.io.IOException;
@@ -13,7 +15,7 @@ import java.util.Locale;
 final class LspServers {
     private LspServers() {}
 
-    static final class Spec {
+    public static final class Spec {
         final String languageId;
         final List<String> command;
 
@@ -23,7 +25,7 @@ final class LspServers {
         }
     }
 
-    static String languageId(String filename) {
+    public static String languageId(String filename) {
         String ext = extension(filename);
         switch (ext) {
             case "go": return "go";
@@ -36,7 +38,7 @@ final class LspServers {
     }
 
     /** Returns null when the language is unknown or no server is installed. */
-    static Spec forFile(String filename, Path rootDir) {
+    public static Spec forFile(String filename, Path rootDir) {
         String lang = languageId(filename);
         if (lang == null) return null;
 
