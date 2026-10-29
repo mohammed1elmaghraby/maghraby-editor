@@ -129,8 +129,8 @@ public final class Autocomplete {
         java.util.Map<String, Boolean> isKeyword = new java.util.HashMap<>();
 
         // Scan a window around the cursor so a huge file doesn't make every keystroke slow.
-        int from = Math.max(0, cursorRow - 2000);
-        int to = Math.min(ed().getLineCount(), cursorRow + 2000);
+        int from = Math.max(0, cursorRow - 150);
+        int to = Math.min(ed().getLineCount(), cursorRow + 150);
         for (String line : ed().getLines(from, to)) {
             int n = line.length();
             int i = 0;
@@ -138,9 +138,8 @@ public final class Autocomplete {
                 if (Character.isJavaIdentifierStart(line.charAt(i))) {
                     int j = i + 1;
                     while (j < n && Character.isJavaIdentifierPart(line.charAt(j))) j++;
-                    String w = line.substring(i, j);
-                    if (w.length() > prefix.length() && w.toLowerCase(java.util.Locale.ROOT).startsWith(lower)) {
-                        counts.merge(w, 1, Integer::sum);
+                    if (j - i > prefix.length() && line.regionMatches(true, i, prefix, 0, prefix.length())) {
+                        counts.merge(line.substring(i, j), 1, Integer::sum);
                     }
                     i = j;
                 } else {
