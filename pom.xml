@@ -7,7 +7,7 @@
 
   <groupId>com.editor</groupId>
   <artifactId>maghraby-editor</artifactId>
-  <version>3.0</version>
+  <version>4.0</version>
 
   <properties>
     <maven.compiler.source>17</maven.compiler.source>
@@ -62,6 +62,9 @@
             <buildArg>--no-fallback</buildArg>
             <buildArg>--enable-preview</buildArg>
             <buildArg>-H:+ReportExceptionStackTraces</buildArg>
+            <!--  Static Linking -->
+            <buildArg>--static</buildArg>
+            <buildArg>--libc=musl</buildArg>
           </buildArgs>
         </configuration>
       </plugin>
