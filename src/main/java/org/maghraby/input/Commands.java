@@ -1,5 +1,7 @@
 package org.maghraby.input;
 
+import org.maghraby.core.Doc;
+import org.maghraby.core.TextEditor;
 import org.maghraby.runner.CodeRunner;
 import org.maghraby.ui.*;
 
@@ -103,6 +105,17 @@ public final class Commands {
                     statusMessage = "Unknown option: " + arg + "   (rnu, nornu)";
                 }
                 break;
+            case "e": case "edit": openFile(arg, false); break;
+            case "e!": case "edit!": openFile(arg, true); break;
+            case "tree": case "explorer":
+                if (arg.isEmpty()) {
+                    Sidebar.toggle();
+                } else {
+                    Path dir = normPath(arg);
+                    if (dir != null && Files.isDirectory(dir)) Sidebar.show(dir);
+                    else statusMessage = "Not a directory: " + arg;
+                }
+                break;
             case "goto": case "go": case "g": gotoLine(arg); break;
             case "help": case "h": statusMessage = HELP; break;
             default:
@@ -110,6 +123,66 @@ public final class Commands {
                 if (name.equals("$") || name.matches("\\d+")) gotoLine(name);
                 else statusMessage = "Unknown command: " + cmdLine + "   (try :help)";
         }
+    }
+
+    /**
+     * :e [file] / :e! [file]. Replaces the document of the focused pane with another file (a new empty
+     * buffer when it does not exist yet). {@code :e!} discards unsaved changes, and with no name it
+     * reloads the current file. A directory opens the file tree there. Returns true when a file was opened.
+     */
+    public static boolean openFile(String arg, boolean force) {
+        String name = arg.trim();
+        boolean reload = false;
+        if (name.isEmpty()) {
+            if (!force) {
+                statusMessage = "Usage: :e <file>    (:e! discards unsaved changes, :tree opens the file tree)";
+                return false;
+            }
+            name = D().filename;
+            reload = true;
+        }
+        Path path = normPath(name);
+        if (path != null && Files.isDirectory(path)) { // ":e ." opens the tree there
+            Sidebar.show(path);
+            return false;
+        }
+
+        Doc cur = D();
+        boolean sharedWithOther = split != Split.NONE && docs[1 - focus] == cur;
+        if (!reload && path != null && path.equals(normPath(cur.filename))) {
+            statusMessage = "Already editing " + name;
+            return true;
+        }
+        if (!force && !sharedWithOther && cur.editor.isDirty()) {
+            statusMessage = "Unsaved changes! :w to save, or :e! " + name + " to discard them.";
+            return false;
+        }
+
+        Doc target = (!reload && split != Split.NONE) ? findOpenDoc(name) : null; // the other pane has it: share it
+        String loadMsg = null;
+        if (target == null) {
+            TextEditor e = new TextEditor();
+            loadMsg = e.loadFromFile(name);
+            if (loadMsg.startsWith("Error")) {
+                statusMessage = loadMsg;
+                return false;
+            }
+            target = new Doc(e, name);
+        }
+
+        if (showingSuggestions) Autocomplete.closeSuggestions();
+        if (!sharedWithOther) stopLsp(cur, false);
+        docs[focus] = target;
+        cursorRow = 0;
+        cursorCol = 0;
+        goalCol = 0;
+        paneTop[focus] = 0;
+        paneLeft[focus] = 0;
+        forceClear.set(true);
+        if (loadMsg != null) startLsp(target);
+        refreshGitBranch();
+        statusMessage = loadMsg != null ? loadMsg : "Opened " + name + " (also shown in the other pane).";
+        return true;
     }
 
     /** Moves the cursor to a 1-based line number ("$" = last line). Out-of-range numbers are clamped. */

@@ -127,7 +127,7 @@ public final class Renderer {
         switch (mode) {
             case INSERT: return "-- INSERT --  Esc:normal  Tab:accept/indent  ↑↓:choose suggestion";
             case COMMAND: return HELP;
-            default: return DEFAULT_STATUS;
+            default: return Sidebar.isFocused() ? Sidebar.HINT : DEFAULT_STATUS;
         }
     }
 
@@ -205,7 +205,7 @@ public final class Renderer {
      * and scrolls it so its cursor is visible. Returns {visual cursor column, gutter width, clamped column}.
      */
     public static int[] drawPane(StringBuilder sb, int idx, Doc doc, int x, int y, int w, int h, int row, int col,
-                          boolean active, boolean eraseEol) {
+                                 boolean active, boolean eraseEol) {
         if (h <= 0 || w <= 0) return new int[]{0, 0, col};
 
         TextEditor ed = doc.editor;
@@ -311,6 +311,10 @@ public final class Renderer {
         int row = cursorRow;
         int col = cursorCol;
         int textRows = rows - 3; // rows 2 .. rows-2: between the tab line and the status line
+        int sbw = Sidebar.width(cols);              // file tree width, 0 when closed or the terminal is narrow
+        int x0 = sbw > 0 ? sbw + 2 : 1;             // first column of the editor area (tree + separator line)
+        int ecols = cols - x0 + 1;                  // width of the editor area
+        boolean sbFocus = Sidebar.isFocused();
         long now = System.currentTimeMillis();
 
         // Tell the highlight-state cache which lines were edited since the previous frame. Done before
@@ -326,12 +330,12 @@ public final class Renderer {
         row = Math.max(0, Math.min(row, lineCount - 1));
 
         // --- Pane layout: one pane, or two side by side / stacked ---
-        int[] px = {1, 1}, py = {2, 2}, pw = {cols, cols}, ph = {textRows, textRows};
+        int[] px = {x0, x0}, py = {2, 2}, pw = {ecols, ecols}, ph = {textRows, textRows};
         if (sp == Split.VERTICAL) {
-            int wl = (cols - 1) / 2;
+            int wl = (ecols - 1) / 2;
             pw[0] = wl;
-            px[1] = wl + 2;
-            pw[1] = cols - wl - 1;
+            px[1] = x0 + wl + 1;
+            pw[1] = ecols - wl - 1;
         } else if (sp == Split.HORIZONTAL) {
             int ht = (textRows - 1) / 2;
             ph[0] = ht;
@@ -359,6 +363,9 @@ public final class Renderer {
         sb.append(ESC).append("[1;1H")
                 .append(bar(tab.colored.toString(), tab.len, badge[0], badge[1].length(), cols, bg(234)));
 
+        // --- File tree (left) ---
+        if (sbw > 0) Sidebar.draw(sb, 1, 2, sbw, textRows, Panes.normPath(filename));
+
         // --- Body: one or two panes ---
         int[] activeInfo = {0, 0, col}; // {visual column, gutter width, clamped column} of the focused pane
         for (int i = 0; i < paneCount; i++) {
@@ -367,18 +374,18 @@ public final class Renderer {
             int r = active ? row : Math.max(0, Math.min(savedRow[i], pd.editor.getLineCount() - 1));
             int c = active ? col : savedCol[i];
             boolean eraseEol = px[i] + pw[i] - 1 >= cols; // the pane touches the right edge of the screen
-            int[] info = drawPane(sb, i, pd, px[i], py[i], pw[i], ph[i], r, c, active, eraseEol);
+            int[] info = drawPane(sb, i, pd, px[i], py[i], pw[i], ph[i], r, c, active && !sbFocus, eraseEol);
             if (active) activeInfo = info;
         }
         if (sp == Split.VERTICAL) {
             sb.append(fg(238));
             for (int k = 0; k < textRows; k++) {
-                sb.append(ESC).append('[').append(2 + k).append(';').append(pw[0] + 1).append('H').append('│');
+                sb.append(ESC).append('[').append(2 + k).append(';').append(px[0] + pw[0]).append('H').append('│');
             }
             sb.append(ANSI_RESET);
         } else if (sp == Split.HORIZONTAL) {
-            sb.append(ESC).append('[').append(py[0] + ph[0]).append(";1H").append(fg(238))
-                    .append(repeat("─", cols)).append(ANSI_RESET);
+            sb.append(ESC).append('[').append(py[0] + ph[0]).append(';').append(x0).append('H').append(fg(238))
+                    .append(repeat("─", ecols)).append(ANSI_RESET);
         }
         int editorX = px[fo];
         int editorCols = pw[fo];
@@ -414,6 +421,7 @@ public final class Renderer {
         left.add(BOLD_OFF + bg(235) + fg(252),
                 " " + clip(sanitize(baseName(filename)), Math.max(8, cols / 3)) + (ed().isDirty() ? " ●" : "") + " ");
 
+
         String posText = (row + 1) + ":" + (col + 1);
         Line right = statusRight(true, dc, pct, posText, clock);
         if (left.len + right.len > cols) right = statusRight(false, dc, pct, posText, clock);
@@ -423,8 +431,17 @@ public final class Renderer {
                 .append(sliceAnsi(left.colored.toString(), 0, cols));
         int fill = cols - Math.min(left.len, cols) - right.len;
         sb.append(bg(235)).append(fg(60)).append(BOLD_OFF);
-        if (fill >= 3) sb.append(' ').append(repeat("╱", fill - 2)).append(' ');
-        else sb.append(spaces(fill));
+        if (fill >= 3) {
+            // The ╱╱╱ filler doubles as a progress bar: the part up to the cursor's position is bright.
+            int bar = fill - 2;
+            int done = (int) Math.round(bar * pct / 100.0);
+            sb.append(' ');
+            if (done > 0) sb.append(fg(141)).append(repeat("╱", done));
+            if (done < bar) sb.append(fg(60)).append(repeat("╱", bar - done));
+            sb.append(' ');
+        } else {
+            sb.append(spaces(fill));
+        }
         sb.append(right.colored).append(ANSI_RESET);
 
         // --- Bottom line: command prompt, a fresh message, the diagnostic under the cursor, or a hint ---
@@ -511,7 +528,7 @@ public final class Renderer {
         // popup drawing above can never leave the cursor inside it.
         sb.append(ESC).append(mode == Mode.INSERT ? "[6 q" : "[2 q");
         sb.append(cursorSeq);
-        sb.append(ANSI_SHOW_CURSOR);
+        if (!sbFocus || mode == Mode.COMMAND) sb.append(ANSI_SHOW_CURSOR); // the tree has no text cursor
         return sb.toString();
     }
 }

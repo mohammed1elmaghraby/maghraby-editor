@@ -12,6 +12,8 @@ import static org.maghraby.core.State.*;
 import static org.maghraby.ui.Panes.*;
 import static org.maghraby.input.Autocomplete.*;
 import static org.maghraby.input.Commands.*;
+import org.maghraby.ui.Sidebar;
+
 import static org.maghraby.ui.Terminal.termRows;
 
 /**
@@ -36,8 +38,10 @@ public final class Input {
                     break;
                 } else if (b == 19) {                            // Ctrl+S: Save
                     saveCommand("");
-                } else if (b == 23) {                            // Ctrl+W: switch split pane
-                    switchPane();
+                } else if (b == 2) {                             // Ctrl+B: file tree on/off
+                    Sidebar.toggle();
+                } else if (b == 23) {                            // Ctrl+W: next pane, then the file tree
+                    cycleFocus();
                 } else if (b == 27) {
                     handleEscapeSequence(in);
                 } else if (b == 127 || b == 8) {
@@ -152,6 +156,10 @@ public final class Input {
     }
 
     public static void handleText(String s) {
+        if (currentMode == Mode.NORMAL && Sidebar.isFocused() && !":".equals(s)) {
+            Sidebar.handleKey(s); // the tree owns the keyboard (':' still opens the command line)
+            return;
+        }
         if (currentMode == Mode.INSERT) {
             int[] pos = ed().insertAt(cursorRow, cursorCol, s);
             cursorRow = pos[0];
@@ -185,7 +193,7 @@ public final class Input {
     }
 
     public static void handleTab() {
-        if (currentMode == Mode.NORMAL) { switchPane(); return; }
+        if (currentMode == Mode.NORMAL) { cycleFocus(); return; }
         if (currentMode != Mode.INSERT) return;
         if (suggestionsOpen()) { // Tab accepts the highlighted suggestion
             acceptSuggestion();
@@ -222,6 +230,10 @@ public final class Input {
     }
 
     public static void handleEnter() {
+        if (currentMode == Mode.NORMAL && Sidebar.isFocused()) {
+            Sidebar.activate();
+            return;
+        }
         if (currentMode == Mode.INSERT) {
             if (showingSuggestions) closeSuggestions(); else if (D().lsp != null) D().lsp.cancelSuggestions();
 
@@ -258,10 +270,16 @@ public final class Input {
             currentMode = Mode.NORMAL;
             commandInput.setLength(0);
             statusMessage = "NORMAL MODE";
+        } else if (Sidebar.isFocused()) {
+            Sidebar.blur(); // Esc leaves the file tree
         }
     }
 
     public static void handleArrow(int rowDelta, int colDelta) {
+        if (currentMode == Mode.NORMAL && Sidebar.isFocused()) {
+            Sidebar.arrow(rowDelta, colDelta);
+            return;
+        }
         if (suggestionsOpen()) {
             List<LspDocumentSync.Completion> list = activeSuggestions;
             if (list != null && rowDelta != 0) { // Up/Down move the selection
@@ -296,17 +314,23 @@ public final class Input {
     }
 
     public static void handleHome() {
+        if (Sidebar.isFocused()) return;
         if (showingSuggestions) closeSuggestions();
         if (currentMode == Mode.NORMAL || currentMode == Mode.INSERT) cursorCol = 0;
     }
 
     public static void handleEnd() {
+        if (Sidebar.isFocused()) return;
         if (showingSuggestions) closeSuggestions();
         if (currentMode == Mode.NORMAL || currentMode == Mode.INSERT) cursorCol = ed().getLineLength(cursorRow);
     }
 
     public static void handlePage(int direction) {
         if (currentMode == Mode.COMMAND) return;
+        if (Sidebar.isFocused()) {
+            Sidebar.pageMove(direction);
+            return;
+        }
         if (showingSuggestions) closeSuggestions();
         int step = Math.max(1, termRows - 4);
         cursorRow += direction * step;

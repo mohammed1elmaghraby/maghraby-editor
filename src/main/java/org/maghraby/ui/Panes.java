@@ -111,6 +111,23 @@ public final class Panes {
         }
     }
 
+    /**
+     * Tab / Ctrl+W: the editor panes first (left to right), then the file tree, then back to the first
+     * pane. Without a tree this is just {@link #switchPane()}.
+     */
+    public static void cycleFocus() {
+        if (Sidebar.isFocused()) {
+            Sidebar.blur();
+            if (split != Split.NONE && focus == 1) switchPane(); // wrap around to the first pane
+            return;
+        }
+        if (Sidebar.isVisible() && (split == Split.NONE || focus == 1)) {
+            Sidebar.focusTree();
+            return;
+        }
+        switchPane();
+    }
+
     /** Gives the cursor to the other pane. */
     public static void switchPane() {
         if (split == Split.NONE) return;
