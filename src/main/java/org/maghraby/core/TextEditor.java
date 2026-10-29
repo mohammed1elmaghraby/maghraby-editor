@@ -6,6 +6,7 @@ import org.maghraby.ds.MyStack;
 
 import java.io.BufferedWriter;
 import java.io.IOException;
+import java.io.OutputStreamWriter;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.InvalidPathException;
@@ -41,8 +42,13 @@ public class TextEditor {
 
     // --- Document metrics kept in sync by insertText / deleteText ---
     private int docLength;                 // total characters in the document
-    private int[] lineStarts = new int[16]; // lineStarts[i] = offset where line i begins (sorted)
+    // Line index. The real start of line i is ls(i): entries at index >= deltaFrom are stored without
+    // the pending shift `delta`. Typing on one line only changes `delta` (O(1)) instead of rewriting every
+    // later line start, so editing in the middle of a multi-million-line file stays cheap.
+    private int[] lineStarts = new int[16];
     private int lineCount = 1;             // number of valid entries in lineStarts (always >= 1)
+    private int deltaFrom = 1;             // first index whose stored value still lacks `delta`
+    private int delta = 0;
 
     // Lowest line touched by any edit since the last takeDirtyFromLine(); lets the renderer keep
     // per-line caches (e.g. syntax-highlighter state) valid for everything above the edit.
@@ -153,18 +159,26 @@ public class TextEditor {
     // Line Index
     // ------------------------------------------------------------------
 
-    /** Rebuilds lineStarts from scratch by scanning the original buffer once (used on load only). */
+    /** Real offset where line i begins. */
+    private int ls(int i) {
+        return i >= deltaFrom ? lineStarts[i] + delta : lineStarts[i];
+    }
+
+    /** Rebuilds lineStarts from scratch with one pass over the original buffer (used on load only). */
     private void rebuildLineIndex() {
-        int newlines = 0;
-        for (int i = 0; i < originalBuffer.length(); i++) {
-            if (originalBuffer.charAt(i) == '\n') newlines++;
-        }
-        lineStarts = new int[Math.max(16, newlines + 1 + (newlines >> 2))];
+        lineStarts = new int[1024];
         lineCount = 1;
         lineStarts[0] = 0;
-        for (int i = 0; i < originalBuffer.length(); i++) {
-            if (originalBuffer.charAt(i) == '\n') lineStarts[lineCount++] = i + 1;
+        deltaFrom = 1;
+        delta = 0;
+        final String text = originalBuffer;
+        int i = 0;
+        while ((i = text.indexOf('\n', i)) >= 0) {
+            i++;
+            if (lineCount == lineStarts.length) lineStarts = Arrays.copyOf(lineStarts, lineCount * 2);
+            lineStarts[lineCount++] = i;
         }
+        deltaFrom = lineCount;
     }
 
     /** Number of line starts that are <= value (i.e. the index of the first start greater than it). */
@@ -172,7 +186,7 @@ public class TextEditor {
         int lo = 0, hi = lineCount;
         while (lo < hi) {
             int mid = (lo + hi) >>> 1;
-            if (lineStarts[mid] <= value) lo = mid + 1;
+            if (ls(mid) <= value) lo = mid + 1;
             else hi = mid;
         }
         return lo;
@@ -184,6 +198,18 @@ public class TextEditor {
         }
     }
 
+    /** Makes the pending shift apply to exactly the entries at index >= idx (cost: |idx - deltaFrom|). */
+    private void moveDeltaTo(int idx) {
+        if (deltaFrom > lineCount) deltaFrom = lineCount;
+        if (idx < deltaFrom) {
+            for (int k = idx; k < deltaFrom; k++) lineStarts[k] -= delta;
+        } else {
+            for (int k = deltaFrom; k < idx; k++) lineStarts[k] += delta;
+        }
+        deltaFrom = idx;
+        if (deltaFrom >= lineCount) delta = 0; // nothing left that the shift applies to
+    }
+
     /** Text of {@code text} was just inserted at {@code offset}: shift later lines and add new ones. */
     private void indexInsert(int offset, String text) {
         int n = text.length();
@@ -191,15 +217,19 @@ public class TextEditor {
         for (int i = 0; i < n; i++) if (text.charAt(i) == '\n') newlines++;
 
         int idx = upperBound(offset); // first line start strictly after the insertion point
-        ensureLineCapacity(lineCount + newlines);
-        System.arraycopy(lineStarts, idx, lineStarts, idx + newlines, lineCount - idx);
-        for (int k = idx + newlines; k < lineCount + newlines; k++) lineStarts[k] += n;
-
-        int w = idx;
-        for (int j = 0; j < n; j++) {
-            if (text.charAt(j) == '\n') lineStarts[w++] = offset + j + 1;
+        moveDeltaTo(idx);
+        if (newlines > 0) {
+            ensureLineCapacity(lineCount + newlines);
+            System.arraycopy(lineStarts, idx, lineStarts, idx + newlines, lineCount - idx);
+            int w = idx;
+            for (int j = 0; j < n; j++) {
+                if (text.charAt(j) == '\n') lineStarts[w++] = offset + j + 1; // real values, below deltaFrom
+            }
+            lineCount += newlines;
         }
-        lineCount += newlines;
+        deltaFrom = idx + newlines;
+        delta += n;                      // every later line start moves right by n
+        if (deltaFrom >= lineCount) delta = 0;
     }
 
     /** Characters [offset, offset + len) were just removed: drop their line starts, shift the rest. */
@@ -207,8 +237,14 @@ public class TextEditor {
         int lo = upperBound(offset);       // first start > offset
         int hi = upperBound(offset + len); // first start > end  (starts in (offset, end] were deleted)
         int removed = hi - lo;
-        for (int k = hi; k < lineCount; k++) lineStarts[k - removed] = lineStarts[k] - len;
-        lineCount -= removed;
+        moveDeltaTo(hi);
+        if (removed > 0) {
+            System.arraycopy(lineStarts, hi, lineStarts, lo, lineCount - hi);
+            lineCount -= removed;
+        }
+        deltaFrom = lo;
+        delta -= len;
+        if (deltaFrom >= lineCount) delta = 0;
     }
 
     private int clampRow(int row) {
@@ -217,16 +253,16 @@ public class TextEditor {
 
     /** Offset just past the last character of the line (excluding its '\n'). */
     private int lineEnd(int row) {
-        return row + 1 < lineCount ? lineStarts[row + 1] - 1 : docLength;
+        return row + 1 < lineCount ? ls(row + 1) - 1 : docLength;
     }
 
     private int lineLength(int row) {
-        return lineEnd(row) - lineStarts[row];
+        return lineEnd(row) - ls(row);
     }
 
     private int getOffset(int row, int col) {
         row = clampRow(row);
-        return lineStarts[row] + Math.max(0, Math.min(col, lineLength(row)));
+        return ls(row) + Math.max(0, Math.min(col, lineLength(row)));
     }
 
     private int[] calculateNewPosition(int row, int col, String text) {
@@ -257,11 +293,11 @@ public class TextEditor {
             throw new IllegalStateException("lineCount " + lineCount + " != expected " + expectedLines);
         }
         int row = 1;
-        if (lineStarts[0] != 0) throw new IllegalStateException("lineStarts[0] != 0");
+        if (ls(0) != 0) throw new IllegalStateException("ls(0) != 0");
         for (int i = 0; i < text.length(); i++) {
             if (text.charAt(i) == '\n') {
-                if (lineStarts[row] != i + 1) {
-                    throw new IllegalStateException("lineStarts[" + row + "]=" + lineStarts[row] + " expected " + (i + 1));
+                if (ls(row) != i + 1) {
+                    throw new IllegalStateException("ls(" + row + ")=" + ls(row) + " expected " + (i + 1));
                 }
                 row++;
             }
@@ -278,7 +314,7 @@ public class TextEditor {
 
     public synchronized String getLine(int index) {
         if (index < 0 || index >= lineCount) return "";
-        return substring(lineStarts[index], lineEnd(index));
+        return substring(ls(index), lineEnd(index));
     }
 
     public synchronized int getLineLength(int index) {
@@ -291,7 +327,7 @@ public class TextEditor {
         from = Math.max(0, from);
         to = Math.min(to, lineCount);
         if (from >= to) return new ArrayList<>();
-        String block = substring(lineStarts[from], lineEnd(to - 1));
+        String block = substring(ls(from), lineEnd(to - 1));
         // Exactly (to - from - 1) newlines in block, so split(-1) yields exactly (to - from) lines.
         return new ArrayList<>(Arrays.asList(block.split("\n", -1)));
     }
@@ -310,7 +346,7 @@ public class TextEditor {
 
         if (changeListener != null) { // position BEFORE the edit, as LSP expects
             int line = upperBound(offset) - 1;
-            changeListener.onInsert(line, offset - lineStarts[line], newText);
+            changeListener.onInsert(line, offset - ls(line), newText);
         }
 
         int n = newText.length();
@@ -370,7 +406,7 @@ public class TextEditor {
         if (changeListener != null) { // range BEFORE the edit, as LSP expects
             int sl = upperBound(offset) - 1;
             int el = upperBound(end) - 1;
-            changeListener.onDelete(sl, offset - lineStarts[sl], el, end - lineStarts[el]);
+            changeListener.onDelete(sl, offset - ls(sl), el, end - ls(el));
         }
 
         int pos = 0;
@@ -445,14 +481,14 @@ public class TextEditor {
         redoStack.clear();
         dirty = true;
 
-        insertText(lineStarts[row] + col, text);
+        insertText(ls(row) + col, text);
 
         return calculateNewPosition(row, col, text);
     }
 
     public synchronized int[] deleteAt(int row, int col) {
         if (row < 0 || row >= lineCount) return new int[]{row, col};
-        int base = lineStarts[row];
+        int base = ls(row);
         int len = lineLength(row);
         col = Math.max(0, Math.min(col, len));
 
@@ -489,7 +525,7 @@ public class TextEditor {
 
     public synchronized int[] deleteForward(int row, int col) {
         if (row < 0 || row >= lineCount) return new int[]{row, col};
-        int base = lineStarts[row];
+        int base = ls(row);
         int len = lineLength(row);
         col = Math.max(0, Math.min(col, len));
 
@@ -576,14 +612,21 @@ public class TextEditor {
         String name = filename.trim();
         try {
             Path path = Paths.get(name);
-            String text = getFullText();
 
-            try (BufferedWriter writer = Files.newBufferedWriter(path, StandardCharsets.UTF_8)) {
-                // Write the buffer exactly as it is. Splitting on '\n' and writing '\n' after every
-                // element added a phantom blank line on each save, because "a\n" splits into ["a", ""].
-                writer.write(text);
+            // Stream the pieces straight to the file. The old version first built the whole document as
+            // one String (two full copies, appended char by char) and then wrote that.
+            try (BufferedWriter writer = new BufferedWriter(
+                    new OutputStreamWriter(Files.newOutputStream(path), StandardCharsets.UTF_8.newEncoder()),
+                    1 << 16)) {
+                for (Piece p : pieces) {
+                    if (p.source == BufferType.ORIGINAL) {
+                        writer.write(originalBuffer, p.start, p.length);
+                    } else {
+                        writer.write(addBuffer.substring(p.start, p.start + p.length));
+                    }
+                }
                 // POSIX-style: a non-empty file ends with exactly one trailing newline (same as vim).
-                if (!text.isEmpty() && text.charAt(text.length() - 1) != '\n') {
+                if (docLength > 0 && charAt(docLength - 1) != '\n') {
                     writer.write('\n');
                 }
             }
