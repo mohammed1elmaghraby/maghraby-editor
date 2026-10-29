@@ -74,12 +74,11 @@ public final class Terminal {
     }
 
     public static void resizeWatcher() {
+        try {   // the terminal sends SIGWINCH on resize; check the size only then
+            sun.misc.Signal.handle(new sun.misc.Signal("WINCH"), sig -> { if (!renderPaused) updateTerminalSize(); });
+        } catch (Throwable ignored) { /* not supported: the slow poll below still works */ }
         while (running) {
-            try {
-                Thread.sleep(500);
-            } catch (InterruptedException e) {
-                return;
-            }
+            try { Thread.sleep(2000); } catch (InterruptedException e) { return; }
             if (!renderPaused) updateTerminalSize();
         }
     }
