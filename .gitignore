@@ -31,3 +31,4 @@ test
 test.cpp
 *.out.factorypath
 .factorypath
+*.py
