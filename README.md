@@ -39,6 +39,15 @@ A lightweight, zero-dependency, modal terminal text editor built entirely from s
 
 ### 3. Visual Progress Status Bar
 - Dual-color progress indicator integrated into the status bar (`╱╱╱`) that visually reflects the cursor's relative vertical position in the active document.
+- File info next to the cursor position: language, line count, indentation (`Spaces: 4`) and encoding (`UTF-8`). On narrow terminals it shrinks to language + line count, then disappears, so the bar never overflows.
+- The editor name (`maghraby`) sits at the top-left of the tab line, next to the open file tab(s).
+
+### 4. Auto-Closing Pairs (Insert Mode)
+- Typing `(`, `[`, `{`, `"`, `'` or `` ` `` inserts the matching closer and leaves the cursor between them.
+- Typing a closer that is already next to the cursor steps over it instead of duplicating it.
+- `Backspace` inside an empty pair (`(|)`) removes both characters; `Enter` inside `{|}` opens an indented block with the closer on its own line.
+- Quotes do not pair next to word characters (`don't`, `5"`), and an opener right before other code is left alone.
+- Turn it off with `:set noautopair` (back on with `:set autopair`).
 
 ---
 
@@ -92,6 +101,7 @@ A lightweight, zero-dependency, modal terminal text editor built entirely from s
 | `:run [args]` | `:run arg1 arg2` | Compile and run active file with terminal handover |
 | `:compile` / `:build` | `:compile` | Compile / syntax check without running |
 | `:set icons` / `:set noicons` | `:set noicons` | Turn Nerd Font file-tree icons on / off |
+| `:set autopair` / `:set noautopair` | `:set noautopair` | Turn auto-closing pairs on / off |
 | `:help` / `:h` | `:help` | Show command assistance |
 
 ---

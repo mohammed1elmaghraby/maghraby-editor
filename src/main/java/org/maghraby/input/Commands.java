@@ -109,8 +109,14 @@ public final class Commands {
                     nerdIcons = false;
                     needsRedraw = true;
                     statusMessage = "Nerd Font icons off.";
+                } else if (arg.equals("autopair") || arg.equals("pairs")) {
+                    autoPairs = true;
+                    statusMessage = "Auto-closing pairs on.";
+                } else if (arg.equals("noautopair") || arg.equals("nopairs")) {
+                    autoPairs = false;
+                    statusMessage = "Auto-closing pairs off.";
                 } else {
-                    statusMessage = "Unknown option: " + arg + "   (rnu, nornu, icons, noicons)";
+                    statusMessage = "Unknown option: " + arg + "   (rnu, nornu, icons, noicons, autopair, noautopair)";
                 }
                 break;
             case "e": case "edit": openFile(arg, false); break;

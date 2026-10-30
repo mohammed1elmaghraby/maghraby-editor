@@ -37,7 +37,7 @@ public final class State {
     public static final String DEFAULT_STATUS =
             "i:insert  ::command  Tab:switch pane  u:undo  r:redo  F5:run  q:quit  (:help)";
     public static final String HELP =
-            ":<line>  :w [file]  :wq  :q  :q!  :run [args]  :compile  :lsp [stop]  :vsplit  :split  :only  :set rnu|nornu|icons|noicons  |  Tab/Ctrl+W switch pane  F5 run  Ctrl+S save  Ctrl+Q force-quit";
+            ":<line>  :w [file]  :wq  :q  :q!  :run [args]  :compile  :lsp [stop]  :vsplit  :split  :only  :set rnu|nornu|icons|noicons|autopair|noautopair  |  Tab/Ctrl+W switch pane  F5 run  Ctrl+S save  Ctrl+Q force-quit";
     public static volatile String statusMessage = DEFAULT_STATUS;
     public static volatile Mode currentMode = Mode.NORMAL;
     public static final StringBuffer commandInput = new StringBuffer();
@@ -47,6 +47,9 @@ public final class State {
 
     // --- Nerd Font file icons in the tree (:set icons / :set noicons, or MAGHRABY_ICONS=0) ---
     public static volatile boolean nerdIcons = org.maghraby.ui.FileIcons.enabledByEnvironment();
+
+    // --- Auto-closing pairs ( ) [ ] { } " ' ` in insert mode (:set autopair / :set noautopair) ---
+    public static volatile boolean autoPairs = true;
 
     public static volatile String gitBranch = "";
     public static volatile Split split = Split.NONE;

@@ -161,6 +161,7 @@ public final class Input {
             return;
         }
         if (currentMode == Mode.INSERT) {
+            if (autoPairs && s.length() == 1 && handleAutoPair(s.charAt(0))) return;
             int[] pos = ed().insertAt(cursorRow, cursorCol, s);
             cursorRow = pos[0];
             cursorCol = pos[1];
@@ -192,6 +193,72 @@ public final class Input {
         }
     }
 
+    // ------------------------------------------------------------------
+    // Auto-closing pairs: ( ) [ ] { } " ' `
+    // ------------------------------------------------------------------
+
+    /** The character that closes {@code open}, or 0 when {@code open} does not start a pair. */
+    static char closerFor(char open) {
+        switch (open) {
+            case '(': return ')';
+            case '[': return ']';
+            case '{': return '}';
+            case '"': return '"';
+            case '\'': return '\'';
+            case '`': return '`';
+            default: return 0;
+        }
+    }
+
+    private static boolean isQuote(char c) {
+        return c == '"' || c == '\'' || c == '`';
+    }
+
+    private static boolean isWordChar(char c) {
+        return Character.isLetterOrDigit(c) || c == '_';
+    }
+
+    /** True for an empty bracket pair like "()", "[]" or "{}" (quotes do not count). */
+    static boolean isBracketPair(char open, char close) {
+        return (open == '(' && close == ')') || (open == '[' && close == ']') || (open == '{' && close == '}');
+    }
+
+    /**
+     * Insert-mode handling of one typed character. Returns true when it was consumed:
+     *  - typing a closer that is already right after the cursor just steps over it;
+     *  - typing an opener inserts the pair and leaves the cursor between the two characters.
+     * Quotes only pair next to non-word characters, so "don't" and 5" stay untouched.
+     */
+    private static boolean handleAutoPair(char c) {
+        String line = ed().getLine(cursorRow);
+        int col = Math.min(cursorCol, line.length());
+        char prev = col > 0 ? line.charAt(col - 1) : 0;
+        char next = col < line.length() ? line.charAt(col) : 0;
+
+        // Step over a closer that is already there.
+        boolean closer = c == ')' || c == ']' || c == '}' || isQuote(c);
+        if (closer && next == c) {
+            cursorCol = col + 1;
+            if (showingSuggestions) closeSuggestions();
+            return true;
+        }
+
+        char close = closerFor(c);
+        if (close == 0) return false;
+        if (isQuote(c)) {
+            if (isWordChar(prev) || isWordChar(next)) return false; // apostrophes, inch marks, "abc"def
+            if (prev == c) return false;                            // third quote of a Python """ docstring
+        } else if (!(next == 0 || Character.isWhitespace(next) || ")]},;".indexOf(next) >= 0)) {
+            return false; // an opener right before other code: do not wrap it
+        }
+
+        int[] pos = ed().insertAt(cursorRow, cursorCol, "" + c + close);
+        cursorRow = pos[0];
+        cursorCol = pos[1] - 1; // between the pair
+        triggerCompletion();
+        return true;
+    }
+
     public static void handleTab() {
         if (currentMode == Mode.NORMAL) { cycleFocus(); return; }
         if (currentMode != Mode.INSERT) return;
@@ -207,6 +274,14 @@ public final class Input {
 
     public static void handleBackspace() {
         if (currentMode == Mode.INSERT) {
+            if (autoPairs) {
+                // Backspace between an empty pair such as "(|)" removes both characters.
+                String line = ed().getLine(cursorRow);
+                int col = Math.min(cursorCol, line.length());
+                if (col > 0 && col < line.length() && closerFor(line.charAt(col - 1)) == line.charAt(col)) {
+                    ed().deleteForward(cursorRow, cursorCol);
+                }
+            }
             int[] pos = ed().deleteAt(cursorRow, cursorCol);
             cursorRow = pos[0];
             cursorCol = pos[1];
@@ -249,6 +324,21 @@ public final class Input {
                 if (last == '{' || last == '(' || last == '[' || last == ':') {
                     for (int i = 0; i < TAB_WIDTH; i++) insert.append(' ');
                 }
+            }
+            // Enter between an empty pair like "{|}" opens a block: the closer drops to its own line.
+            String whole = ed().getLine(cursorRow);
+            int c0 = Math.min(cursorCol, whole.length());
+            boolean splitPair = autoPairs && c0 > 0 && c0 < whole.length()
+                    && isBracketPair(whole.charAt(c0 - 1), whole.charAt(c0));
+            if (splitPair) {
+                int firstRow = cursorRow;
+                StringBuilder indent = new StringBuilder(before.substring(0, ws));
+                StringBuilder inner = new StringBuilder("\n").append(indent);
+                for (int i = 0; i < TAB_WIDTH; i++) inner.append(' ');
+                ed().insertAt(firstRow, cursorCol, inner.append('\n').append(indent).toString());
+                cursorRow = firstRow + 1;
+                cursorCol = ws + TAB_WIDTH; // on the indented middle line
+                return;
             }
             int[] pos = ed().insertAt(cursorRow, cursorCol, insert.toString());
             cursorRow = pos[0];

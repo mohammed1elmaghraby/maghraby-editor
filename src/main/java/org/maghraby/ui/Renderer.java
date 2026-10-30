@@ -186,6 +186,50 @@ public final class Renderer {
         return new int[]{errors, warnings};
     }
 
+    /** Language name shown in the status line, taken from the file name / extension. */
+    public static String languageName(String filename) {
+        String base = baseName(filename == null ? "" : filename).toLowerCase(java.util.Locale.ROOT);
+        if (base.equals("dockerfile")) return "Dockerfile";
+        if (base.equals("makefile")) return "Makefile";
+        int dot = base.lastIndexOf('.');
+        String ext = dot >= 0 ? base.substring(dot + 1) : "";
+        switch (ext) {
+            case "java": return "Java";
+            case "py": case "pyw": return "Python";
+            case "c": case "h": return "C";
+            case "cpp": case "cc": case "cxx": case "hpp": case "hh": return "C++";
+            case "js": case "mjs": case "cjs": return "JavaScript";
+            case "ts": return "TypeScript";
+            case "json": return "JSON";
+            case "md": case "markdown": return "Markdown";
+            case "sh": case "bash": case "zsh": return "Shell";
+            case "html": case "htm": return "HTML";
+            case "css": return "CSS";
+            case "xml": return "XML";
+            case "yml": case "yaml": return "YAML";
+            case "toml": return "TOML";
+            case "txt": return "Text";
+            default: return "Plain Text";
+        }
+    }
+
+    /**
+     * File info for the status line, between the progress bar and the cursor position:
+     * language | line count | indentation | encoding. `wide` adds the last two.
+     */
+    public static Line statusInfo(boolean wide, String lang, int lines) {
+        Line r = new Line();
+        String sep = bg(235) + fg(238);
+        String dim = bg(235) + fg(245);
+        r.add(bg(235) + fg(150), " " + lang + " ");
+        r.add(sep, "│").add(dim, " " + lines + (lines == 1 ? " line " : " lines "));
+        if (wide) {
+            r.add(sep, "│").add(dim, " Spaces: " + TAB_WIDTH + " ");
+            r.add(sep, "│").add(dim, " UTF-8 ");
+        }
+        return r;
+    }
+
     /** Right-hand side of the status line. `full` adds diagnostics and the scroll percentage. */
     public static Line statusRight(boolean full, int[] dc, int pct, String pos, String clock) {
         Line r = new Line();
@@ -348,6 +392,9 @@ public final class Renderer {
         Line tab = new Line();
         boolean twoFiles = paneCount == 2 && docs[0] != docs[1];
         int tabMax = Math.max(8, cols / (twoFiles ? 5 : 3));
+        if (cols >= 40) { // the editor's name, back at the top-left next to the file tab(s)
+            tab.add(bg(235) + fg(75) + BOLD, " maghraby ").add(BOLD_OFF + bg(235) + fg(240), "│");
+        }
         for (int i = 0; i < (twoFiles ? 2 : 1); i++) {
             Doc td = twoFiles ? docs[i] : ad;
             boolean act = twoFiles ? i == fo : true;
@@ -424,12 +471,17 @@ public final class Renderer {
 
         String posText = (row + 1) + ":" + (col + 1);
         Line right = statusRight(true, dc, pct, posText, clock);
+        // File info (language, lines, indentation, encoding) is shown only while it leaves room for the bar.
+        String lang = languageName(filename);
+        Line info = statusInfo(true, lang, lineCount);
+        if (left.len + info.len + right.len + 6 > cols) info = statusInfo(false, lang, lineCount);
+        if (left.len + info.len + right.len + 6 > cols) info = new Line();
         if (left.len + right.len > cols) right = statusRight(false, dc, pct, posText, clock);
         if (left.len + right.len > cols) right = new Line();
 
         sb.append(ESC).append('[').append(rows - 1).append(";1H").append(bg(235))
                 .append(sliceAnsi(left.colored.toString(), 0, cols));
-        int fill = cols - Math.min(left.len, cols) - right.len;
+        int fill = cols - Math.min(left.len, cols) - info.len - right.len;
         sb.append(bg(235)).append(fg(60)).append(BOLD_OFF);
         if (fill >= 3) {
             // The ╱╱╱ filler doubles as a progress bar: the part up to the cursor's position is bright.
@@ -442,7 +494,7 @@ public final class Renderer {
         } else {
             sb.append(spaces(fill));
         }
-        sb.append(right.colored).append(ANSI_RESET);
+        sb.append(info.colored).append(right.colored).append(ANSI_RESET);
 
         // --- Bottom line: command prompt, a fresh message, the diagnostic under the cursor, or a hint ---
         sb.append(ESC).append('[').append(rows).append(";1H").append(ANSI_CLEAR_LINE);
