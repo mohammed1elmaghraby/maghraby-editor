@@ -32,3 +32,6 @@ test.cpp
 *.out.factorypath
 .factorypath
 *.py
+# GraalVM build artifacts
+svm_err_*.md
+maghraby-linux-*
