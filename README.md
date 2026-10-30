@@ -31,6 +31,7 @@ A lightweight, zero-dependency, modal terminal text editor built entirely from s
 ### 1. Interactive File Tree Sidebar
 - Toggleable file tree viewer mapped to `Ctrl+B` or `:tree` / `:explorer`.
 - Navigate directories using arrow keys, open files with `Enter`, or switch focus seamlessly between panes and the sidebar using `Tab` or `Ctrl+W`.
+- **Nerd Font file icons:** folders (open/closed) and common file types (Java, Python, C/C++, JS/TS, JSON, HTML/CSS, Markdown, shell, images, archives, `.gitignore`, `Dockerfile`, ...) get colored icons. This needs a [Nerd Font](https://www.nerdfonts.com/font-downloads) set as your terminal's font (e.g. JetBrainsMono Nerd Font, FiraCode Nerd Font, Hack Nerd Font). Without one the icons render as empty boxes, so turn them off with `:set noicons` (back on with `:set icons`) or start the editor with `MAGHRABY_ICONS=0`.
 
 ### 2. In-Editor File Navigation
 - Open new files or switch active buffers without leaving the editor using `:e <filename>` or `:edit <filename>`.
@@ -90,6 +91,7 @@ A lightweight, zero-dependency, modal terminal text editor built entirely from s
 | `:goto <line>` / `:g <line>` | `:g 42` or `:g $` | Move cursor to specific line number (`$` for end) |
 | `:run [args]` | `:run arg1 arg2` | Compile and run active file with terminal handover |
 | `:compile` / `:build` | `:compile` | Compile / syntax check without running |
+| `:set icons` / `:set noicons` | `:set noicons` | Turn Nerd Font file-tree icons on / off |
 | `:help` / `:h` | `:help` | Show command assistance |
 
 ---

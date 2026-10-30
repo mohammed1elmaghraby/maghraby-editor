@@ -371,9 +371,14 @@ public final class Sidebar {
                 continue;
             }
             Entry e = list.get(idx);
-            String icon = e.more ? "  " : e.dir ? (e.expanded ? "▾ " : "▸ ") : "  ";
+            // Nerd Font icon (one char, own colour); falls back to the plain ▾ / ▸ arrows when switched off
+            FileIcons.Icon nerd = (nerdIcons && !e.more)
+                    ? FileIcons.forEntry(e.path.getFileName().toString(), e.dir, e.expanded) : null;
+            String icon = nerd != null ? nerd.glyph + " "
+                    : e.more ? "  " : e.dir ? (e.expanded ? "▾ " : "▸ ") : "  ";
             String name = e.more ? "… more files not shown" : sanitize(e.path.getFileName().toString()) + (e.dir ? "/" : "");
-            String text = clip(" " + spaces(2 * e.depth) + icon + name, w);
+            String prefix = " " + spaces(2 * e.depth);
+            String text = clip(prefix + icon + name, w);
 
             String style;
             if (idx == sel) style = (foc ? bg(24) : bg(238)) + fg(231);
@@ -381,7 +386,15 @@ public final class Sidebar {
             else if (!e.dir && currentFile != null && currentFile.equals(e.path)) style = fg(221) + BOLD;
             else if (e.dir) style = fg(110);
             else style = fg(252);
-            sb.append(style).append(text).append(spaces(w - text.length())).append(ANSI_RESET);
+            sb.append(style);
+            if (nerd != null && text.length() > prefix.length()) {
+                int p = prefix.length();
+                sb.append(text, 0, p).append(fg(nerd.color)).append(text.charAt(p))
+                        .append(style).append(text, p + 1, text.length());
+            } else {
+                sb.append(text);
+            }
+            sb.append(spaces(w - text.length())).append(ANSI_RESET);
         }
 
         sb.append(fg(238));

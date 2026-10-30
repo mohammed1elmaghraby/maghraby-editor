@@ -101,8 +101,16 @@ public final class Commands {
                 } else if (arg.equals("nornu") || arg.equals("norelativenumber")) {
                     relativeNumbers = false;
                     statusMessage = "Relative line numbers off.";
+                } else if (arg.equals("icons") || arg.equals("nerdicons")) {
+                    nerdIcons = true;
+                    needsRedraw = true;
+                    statusMessage = "Nerd Font icons on (needs a Nerd Font in your terminal).";
+                } else if (arg.equals("noicons") || arg.equals("nonerdicons")) {
+                    nerdIcons = false;
+                    needsRedraw = true;
+                    statusMessage = "Nerd Font icons off.";
                 } else {
-                    statusMessage = "Unknown option: " + arg + "   (rnu, nornu)";
+                    statusMessage = "Unknown option: " + arg + "   (rnu, nornu, icons, noicons)";
                 }
                 break;
             case "e": case "edit": openFile(arg, false); break;
