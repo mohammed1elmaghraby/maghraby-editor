@@ -53,6 +53,9 @@ public final class HighlighterRegistry {
 
         // Python
         register(new PythonHighlighter());
+
+        // Bash / POSIX shell / Zsh (.sh, .bash, .zsh, .bashrc ...)
+        register(new BashHighlighter());
     }
 
     public void register(SyntaxHighlighter highlighter) {
