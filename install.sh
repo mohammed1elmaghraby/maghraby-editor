@@ -11,9 +11,9 @@ INSTALL_BIN_DIR="/usr/local/bin"
 INSTALL_SHARE_DIR="/usr/local/share/maghraby-editor"
 
 # 1. Check for a compiled GraalVM native binary
-if [ -f "target/maghraby" ]; then
+if [ -f "target/maghraby-linux-x86_64" ]; then
     echo "[+] GraalVM native binary found!"
-    cp target/maghraby "$INSTALL_BIN_DIR/maghraby"
+    cp target/maghraby-linux-x86_64 "$INSTALL_BIN_DIR/maghraby"
     chmod +x "$INSTALL_BIN_DIR/maghraby"
 elif ls target/maghraby-editor-*.jar 1> /dev/null 2>&1; then
     # 2. Fallback to standard JAR installation
