@@ -3,25 +3,36 @@ package org.maghraby.syntax;
 import java.util.Set;
 
 /**
- * Syntax highlighter for C-family languages (Java, C, C++, etc.) using ANSI escape codes.
+ * Syntax highlighter for C-family languages (Java, C, C++) using ANSI escape codes.
+ *
+ * Highlights keywords, primitive types, class/type names, constants (true, null, MAX_SIZE), function
+ * calls, names being defined (class Foo), annotations, numbers, strings with coloured escapes,
+ * comments, documentation comments with their @tags, preprocessor lines with #include headers, and
+ * Java text blocks.
  */
 public class CLikeHighlighter implements SyntaxHighlighter {
 
+    private static final Set<String> PRIMITIVES = Set.of(
+            "boolean", "byte", "char", "short", "int", "long", "float", "double", "void", "var",
+            "auto", "bool", "signed", "unsigned", "size_t", "wchar_t");
+
+    private static final Set<String> CONSTANTS = Set.of("true", "false", "null", "nullptr", "NULL");
+
+    private static final Set<String> SELF = Set.of("this", "super");
+
+    /** Keywords after which the next identifier is the name being defined. */
+    private static final Set<String> DEFINERS = Set.of(
+            "class", "interface", "enum", "record", "struct", "union", "namespace", "typename");
+
     private final Set<String> supportedExtensions;
     private final Set<String> keywords;
-
-    // ثوابت ألوان ANSI كبديل لـ TextColor في Lanterna
-    private static final String ANSI_RESET = "\033[0m";
-    private static final String ANSI_GREEN = "\033[38;5;108m";
-    private static final String ANSI_YELLOW = "\033[38;5;180m";
-    private static final String ANSI_MAGENTA = "\033[38;5;176m";
-    private static final String ANSI_CYAN = "\033[38;5;75m";
-    private static final String ANSI_BLUE = "\033[38;5;111m";
-    private static final String ANSI_RED = "\033[38;5;204m";
+    private final boolean preprocessor;
 
     public CLikeHighlighter(Set<String> supportedExtensions, Set<String> keywords) {
         this.supportedExtensions = supportedExtensions;
         this.keywords = keywords;
+        this.preprocessor = supportedExtensions.contains("c") || supportedExtensions.contains("cpp")
+                || supportedExtensions.contains("h");
     }
 
     @Override
@@ -31,188 +42,224 @@ public class CLikeHighlighter implements SyntaxHighlighter {
 
     @Override
     public HighlightResult highlightLine(String line, HighlightState state) {
-        StringBuilder resultLine = new StringBuilder();
+        Emitter em = new Emitter(line.length());
+        int n = line.length();
         int i = 0;
-        boolean inBlock = (state == HighlightState.C_BLOCK_COMMENT);
-        String currentColor = ANSI_RESET;
+        HighlightState next = HighlightState.NORMAL;
+        boolean afterDefiner = false;
 
-        while (i < line.length()) {
+        // ---- continuation of a multi-line construct from a previous line ----
+        if (state == HighlightState.C_BLOCK_COMMENT || state == HighlightState.C_DOC_COMMENT) {
+            boolean doc = state == HighlightState.C_DOC_COMMENT;
+            int end = line.indexOf("*/", 0);
+            String color = doc ? Theme.DOC : Theme.COMMENT;
+            if (end == -1) {
+                em.put(color, doc ? Theme.docWithTags(line) : line);
+                return new HighlightResult(em.finish(), state);
+            }
+            String part = line.substring(0, end + 2);
+            em.put(color, doc ? Theme.docWithTags(part) : part);
+            i = end + 2;
+        } else if (state == HighlightState.C_TEXT_BLOCK) {
+            int end = findUnescaped(line, "\"\"\"", 0);
+            if (end == -1) {
+                em.put(Theme.STRING, Theme.stringWithEscapes(line));
+                return new HighlightResult(em.finish(), state);
+            }
+            em.put(Theme.STRING, Theme.stringWithEscapes(line.substring(0, end + 3)));
+            i = end + 3;
+        }
+
+        while (i < n) {
             char c = line.charAt(i);
-            String token;
-            String newColor;
-            int tokenLength;
 
-            // 1. Ongoing multi-line block comment continuation (/* ... */)
-            if (inBlock) {
-                int end = line.indexOf("*/", i);
-                if (end == -1) {
-                    token = line.substring(i);
-                    inBlock = true;
-                } else {
-                    token = line.substring(i, end + 2);
-                    inBlock = false;
-                }
-                tokenLength = token.length();
-                newColor = ANSI_GREEN;
+            // Single-line comment
+            if (line.startsWith("//", i)) {
+                em.put(Theme.COMMENT, line.substring(i));
+                i = n;
             }
-
-            // 2. Single-line comment (//)
-            else if (line.startsWith("//", i)) {
-                token = line.substring(i);
-                tokenLength = token.length();
-                newColor = ANSI_GREEN;
-            }
-
-            // 3. New multi-line block comment opening (/*)
+            // Block / documentation comment
             else if (line.startsWith("/*", i)) {
+                boolean doc = line.startsWith("/**", i) && !line.startsWith("/**/", i);
                 int end = line.indexOf("*/", i + 2);
+                String color = doc ? Theme.DOC : Theme.COMMENT;
+                String part = end == -1 ? line.substring(i) : line.substring(i, end + 2);
+                em.put(color, doc ? Theme.docWithTags(part) : part);
                 if (end == -1) {
-                    token = line.substring(i);
-                    inBlock = true;
+                    next = doc ? HighlightState.C_DOC_COMMENT : HighlightState.C_BLOCK_COMMENT;
+                    i = n;
                 } else {
-                    token = line.substring(i, end + 2);
+                    i = end + 2;
                 }
-                tokenLength = token.length();
-                newColor = ANSI_GREEN;
             }
-
-            // 4. Preprocessor directives
-            else if (c == '#' && (supportedExtensions.contains("c") || supportedExtensions.contains("cpp") || supportedExtensions.contains("h"))) {
+            // Preprocessor directive (C / C++ only), e.g. #include <stdio.h>
+            else if (c == '#' && preprocessor && onlyBlanksBefore(line, i)) {
                 int end = i + 1;
-                while (end < line.length() && Character.isLetterOrDigit(line.charAt(end))) {
-                    end++;
+                while (end < n && Character.isWhitespace(line.charAt(end))) end++;
+                while (end < n && Character.isLetterOrDigit(line.charAt(end))) end++;
+                String directive = line.substring(i, end);
+                em.put(Theme.META, directive);
+                i = end;
+                if (directive.endsWith("include") || directive.endsWith("import")) {
+                    int s = i;
+                    while (s < n && Character.isWhitespace(line.charAt(s))) s++;
+                    int close = (s < n && line.charAt(s) == '<') ? line.indexOf('>', s) : -1;
+                    if (close != -1) {
+                        em.put(Theme.PLAIN, line.substring(i, s));
+                        em.put(Theme.STRING, line.substring(s, close + 1));
+                        i = close + 1;
+                    }
                 }
-                token = line.substring(i, end);
-                tokenLength = token.length();
-                newColor = ANSI_MAGENTA;
             }
-
-            // 5. Annotations (@Override)
-            else if (c == '@' && Character.isJavaIdentifierStart(peekChar(line, i + 1))) {
+            // Annotation: @Override
+            else if (c == '@' && Character.isJavaIdentifierStart(peek(line, i + 1))) {
                 int end = i + 1;
-                while (end < line.length() && Character.isJavaIdentifierPart(line.charAt(end))) {
-                    end++;
-                }
-                token = line.substring(i, end);
-                tokenLength = token.length();
-                newColor = ANSI_YELLOW;
+                while (end < n && (Character.isJavaIdentifierPart(line.charAt(end)) || line.charAt(end) == '.')) end++;
+                em.put(Theme.META, line.substring(i, end));
+                i = end;
             }
-
-            // 6. String and character literals
+            // Java text block: """ ... """
+            else if (c == '"' && line.startsWith("\"\"\"", i)) {
+                int end = findUnescaped(line, "\"\"\"", i + 3);
+                if (end == -1) {
+                    em.put(Theme.STRING, Theme.stringWithEscapes(line.substring(i)));
+                    next = HighlightState.C_TEXT_BLOCK;
+                    i = n;
+                } else {
+                    em.put(Theme.STRING, Theme.stringWithEscapes(line.substring(i, end + 3)));
+                    i = end + 3;
+                }
+            }
+            // String and character literals
             else if (c == '"' || c == '\'') {
-                char quote = c;
                 int end = i + 1;
                 boolean escaped = false;
-
-                while (end < line.length()) {
-                    char next = line.charAt(end++);
-                    if (escaped) {
-                        escaped = false;
-                    } else if (next == '\\') {
-                        escaped = true;
-                    } else if (next == quote) {
-                        break;
-                    }
+                while (end < n) {
+                    char ch = line.charAt(end++);
+                    if (escaped) escaped = false;
+                    else if (ch == '\\') escaped = true;
+                    else if (ch == c) break;
                 }
-
-                token = line.substring(i, end);
-                tokenLength = token.length();
-                newColor = ANSI_YELLOW;
+                em.put(Theme.STRING, Theme.stringWithEscapes(line.substring(i, end)));
+                i = end;
             }
-
-            // 7. Numeric literals
-            else if (Character.isDigit(c) || (c == '.' && Character.isDigit(peekChar(line, i + 1)))) {
-                int end = i + 1;
-                boolean isHex = (c == '0' && end < line.length() && (line.charAt(end) == 'x' || line.charAt(end) == 'X'));
-                if (isHex) end++;
-
-                while (end < line.length()) {
-                    char next = line.charAt(end);
-                    if (isHex ? isHexDigit(next) : Character.isDigit(next)) {
-                        end++;
-                    } else if (next == '.' && Character.isDigit(peekChar(line, end + 1))) {
-                        end++;
-                    } else if (!isHex && (next == 'e' || next == 'E')
-                            && (Character.isDigit(peekChar(line, end + 1))
-                            || ((peekChar(line, end + 1) == '+' || peekChar(line, end + 1) == '-')
-                            && Character.isDigit(peekChar(line, end + 2))))) {
-                        end += 2; // exponent such as 1e9 or 2.5e-3
-                    } else if (next == 'f' || next == 'F' || next == 'l' || next == 'L' || next == 'd' || next == 'D'
-                            || next == 'u' || next == 'U' || next == '_') {
-                        end++;
-                    } else {
-                        break;
-                    }
-                }
-                token = line.substring(i, end);
-                tokenLength = token.length();
-                newColor = ANSI_MAGENTA;
+            // Numeric literals
+            else if (Character.isDigit(c) || (c == '.' && Character.isDigit(peek(line, i + 1)))) {
+                int end = scanNumber(line, i);
+                em.put(Theme.NUMBER, line.substring(i, end));
+                i = end;
             }
-
-            // 8. Identifiers and keywords
+            // Identifiers and keywords
             else if (Character.isJavaIdentifierStart(c)) {
                 int end = i + 1;
-                while (end < line.length() && Character.isJavaIdentifierPart(line.charAt(end))) {
-                    end++;
-                }
-                token = line.substring(i, end);
-                tokenLength = token.length();
+                while (end < n && Character.isJavaIdentifierPart(line.charAt(end))) end++;
+                String word = line.substring(i, end);
+                boolean definedHere = afterDefiner;
+                afterDefiner = false;
 
-                if (keywords.contains(token)) {
-                    newColor = ANSI_CYAN;
-                } else if (Character.isUpperCase(token.charAt(0))) {
-                    newColor = ANSI_YELLOW;
+                String color;
+                if (definedHere && !keywords.contains(word)) {
+                    color = Theme.DEFINITION;
+                } else if (CONSTANTS.contains(word)) {
+                    color = Theme.CONSTANT;
+                } else if (SELF.contains(word)) {
+                    color = Theme.VARIABLE;
+                } else if (PRIMITIVES.contains(word)) {
+                    color = Theme.TYPE;
+                } else if (keywords.contains(word)) {
+                    color = Theme.KEYWORD;
+                    afterDefiner = DEFINERS.contains(word);
+                } else if (isAllCaps(word)) {
+                    color = Theme.CONSTANT;
+                } else if (Character.isUpperCase(word.charAt(0))) {
+                    color = Theme.TYPE;
+                } else if (nextNonBlank(line, end) == '(') {
+                    color = Theme.FUNCTION;
                 } else {
-                    int peek = end;
-                    while (peek < line.length() && Character.isWhitespace(line.charAt(peek))) {
-                        peek++;
-                    }
-                    if (peek < line.length() && line.charAt(peek) == '(') {
-                        newColor = ANSI_BLUE;
-                    } else {
-                        newColor = ANSI_RESET;
-                    }
+                    color = Theme.PLAIN;
                 }
+                em.put(color, word);
+                i = end;
             }
-
-            // 9. Operators
-            else if ("=+-*/%&|^!<>?:".indexOf(c) != -1) {
-                token = String.valueOf(c);
-                tokenLength = 1;
-                newColor = ANSI_RED;
+            // Operators
+            else if ("=+-*/%&|^!<>?:~".indexOf(c) != -1) {
+                em.put(Theme.OPERATOR, String.valueOf(c));
+                i++;
             }
-
-            // 10. Delimiters
+            // Delimiters and whitespace
             else {
-                token = String.valueOf(c);
-                tokenLength = 1;
-                newColor = ANSI_RESET;
+                em.put(Theme.PLAIN, String.valueOf(c));
+                i++;
             }
-
-            // إضافة اللون فقط إذا تغير لتجنب تكرار رموز ANSI غير الضرورية (Optimization)
-            if (!newColor.equals(currentColor)) {
-                resultLine.append(newColor);
-                currentColor = newColor;
-            }
-            resultLine.append(token);
-
-            i += tokenLength;
         }
 
-        // إغلاق أي لون مفتوح في نهاية السطر
-        if (!currentColor.equals(ANSI_RESET)) {
-            resultLine.append(ANSI_RESET);
-        }
-
-        HighlightState nextState = inBlock ? HighlightState.C_BLOCK_COMMENT : HighlightState.NORMAL;
-        return new HighlightResult(resultLine.toString(), nextState);
+        return new HighlightResult(em.finish(), next);
     }
 
-    private char peekChar(String line, int index) {
+    private static int scanNumber(String line, int i) {
+        int n = line.length();
+        int end = i + 1;
+        char c = line.charAt(i);
+        boolean hex = c == '0' && end < n && (line.charAt(end) == 'x' || line.charAt(end) == 'X');
+        boolean bin = c == '0' && end < n && (line.charAt(end) == 'b' || line.charAt(end) == 'B');
+        if (hex || bin) end++;
+        while (end < n) {
+            char ch = line.charAt(end);
+            if (hex ? isHexDigit(ch) : Character.isDigit(ch)) {
+                end++;
+            } else if (!hex && ch == '.' && Character.isDigit(peek(line, end + 1))) {
+                end++;
+            } else if (!hex && !bin && (ch == 'e' || ch == 'E')
+                    && (Character.isDigit(peek(line, end + 1))
+                    || ((peek(line, end + 1) == '+' || peek(line, end + 1) == '-') && Character.isDigit(peek(line, end + 2))))) {
+                end += 2; // exponent such as 1e9 or 2.5e-3
+            } else if (ch == 'f' || ch == 'F' || ch == 'l' || ch == 'L' || ch == 'd' || ch == 'D'
+                    || ch == 'u' || ch == 'U' || ch == '_') {
+                end++;
+            } else {
+                break;
+            }
+        }
+        return end;
+    }
+
+    private static int findUnescaped(String line, String needle, int from) {
+        int i = from;
+        while (i < line.length()) {
+            if (line.charAt(i) == '\\') { i += 2; continue; }
+            if (line.startsWith(needle, i)) return i;
+            i++;
+        }
+        return -1;
+    }
+
+    private static boolean onlyBlanksBefore(String line, int i) {
+        for (int k = 0; k < i; k++) if (!Character.isWhitespace(line.charAt(k))) return false;
+        return true;
+    }
+
+    private static boolean isAllCaps(String w) {
+        if (w.length() < 2) return false;
+        boolean letter = false;
+        for (int i = 0; i < w.length(); i++) {
+            char ch = w.charAt(i);
+            if (ch >= 'A' && ch <= 'Z') letter = true;
+            else if (!(ch == '_' || (ch >= '0' && ch <= '9'))) return false;
+        }
+        return letter;
+    }
+
+    private static char nextNonBlank(String line, int from) {
+        int p = from;
+        while (p < line.length() && Character.isWhitespace(line.charAt(p))) p++;
+        return p < line.length() ? line.charAt(p) : '\0';
+    }
+
+    private static char peek(String line, int index) {
         return index < line.length() ? line.charAt(index) : '\0';
     }
 
-    private boolean isHexDigit(char c) {
+    private static boolean isHexDigit(char c) {
         return Character.isDigit(c) || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
     }
 }
