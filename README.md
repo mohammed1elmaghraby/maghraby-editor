@@ -1,20 +1,20 @@
 # maghraby-editor
 
-A lightweight, zero-dependency, modal terminal text editor built entirely from scratch in pure Java. Designed for speed and minimal memory footprint, featuring native ANSI terminal rendering, a multi-threaded engine, multi-language syntax highlighting, an integrated code execution runner, an interactive file tree sidebar, and a highly optimized **Piece Table** core architecture.
+A lightweight, zero-dependency, modal terminal text editor built entirely from scratch in pure Java. Designed to stay responsive with a small memory footprint, featuring native ANSI terminal rendering, a multi-threaded engine, multi-language syntax highlighting, an integrated code execution runner, an interactive file tree sidebar, and a **Piece Table** core.
 
 ---
 
 ## Key Architectural Highlights
 
-- **Piece Table Data Structure (v2.0 Engine):** The core buffer engine utilizes a Piece Table architecture (`originalBuffer`, `addBuffer`, and `pieces`). This guarantees near $O(1)$ time complexity for text insertions and deletions, making the editor blazing fast and highly memory-efficient even when handling massive files.
-- **$O(1)$ Lazy Line Indexing (`delta` / `deltaFrom` Shift):** Line index updates during continuous typing are optimized from $O(N)$ to $O(1)$ time complexity. By maintaining a pending positional `delta` shift across line start entries, typing inside a multi-million-line file updates offset calculations in constant time without re-indexing all subsequent lines.
-- **Zero-Copy Streaming File Saver:** Document saving streams `Piece` chunks directly to a `BufferedWriter` without concatenating the full document into intermediate memory `String` buffers, keeping heap allocations flat during large file writes.
-- **Zero-Allocation Autocomplete Engine:** Word suggestions use `String.regionMatches` over a localized search window ($\pm 150$ lines around the cursor) rather than instantiating substring objects, drastically reducing Garbage Collector pressure during fast typing.
+- **Piece Table Buffer:** The text buffer is a Piece Table (`originalBuffer`, `addBuffer` and a `pieces` list), so edits append to a buffer and re-slice pieces instead of copying the whole document. Offset lookup scans the piece list, so cost grows with the number of pieces, not with file size alone. Compaction and a balanced structure (rope or piece tree) are on the roadmap if profiling shows they are needed.
+- **Lazy Line Index (`delta` / `deltaFrom`):** Typing inside a line records a pending offset shift instead of rewriting every later line start, so consecutive edits near the same place avoid an O(N) re-index. This is a deferred-update optimisation, not a universal O(1) guarantee: moving the pending shift to another region still costs work proportional to the lines it crosses.
+- **Streaming File Saver:** Saving writes the pieces straight to a `BufferedWriter` instead of first building the whole document as one `String`. ADD pieces are still read with `addBuffer.substring(...)`, which allocates a short-lived `String` per piece. The documentation proposes a `getChars` and reusable `char[]` variant, to be adopted only if a JMH benchmark shows a benefit.
+- **Allocation-Conscious Autocomplete:** Word suggestions use `String.regionMatches` over a local window (about 150 lines either side of the cursor) rather than creating substring objects for every comparison, which reduces garbage during fast typing.
 - **Signal-Driven Terminal Resizing (`SIGWINCH`):** Handles UNIX `SIGWINCH` signals via native JVM hooks for instant, zero-lag UI re-layouts on terminal resize, supplemented by a low-frequency fallback polling daemon.
 - **Zero External Dependencies:** Built with pure Java and direct POSIX terminal control via ANSI escape codes and `stty`. No third-party UI libraries or framework abstractions.
 - **Multi-Threaded Architecture:**
   - **Input Thread:** Non-blocking raw byte parsing and escape sequence decoding (CSI/SS3 sequences).
-  - **Render Thread:** Smooth, decoupled rendering loop (~60 FPS) with horizontal/vertical viewport clipping and per-line syntax highlighter caching.
+  - **Render Thread:** Decoupled rendering loop (targets about 60 FPS; not benchmarked across machines) with horizontal/vertical viewport clipping and per-line syntax highlighter caching.
   - **Resize Watcher Daemon:** Background terminal size detection paired with signal handlers for dynamic relayout.
 - **Memory-Efficient Delta Undo/Redo:**
   - Uses an action-based delta model (`EditAction`) storing only individual microscopic edits instead of heavy full-buffer snapshots.
@@ -139,7 +139,19 @@ mvn clean package
 
 Run directly:
 ```bash
-java -jar target/maghraby-editor-3.0.jar [filename]
+java -jar target/maghraby-editor-4.0.jar [filename]
 ```
+
+---
+
+## Documentation & Verification Status
+
+A detailed technical case study (architecture, data-structure invariants, concurrency and LSP lock ordering, known weaknesses, and a prioritised roadmap) is in [`docs/Maghraby_Editor.pdf`](docs/Maghraby_Editor.pdf).
+
+What has been checked so far:
+- The main sources compile with plain `javac` and need no third-party libraries.
+- A randomized differential test (3,000 seeded sessions, 600,000 inserts and deletes, comparing text, line count, every line and the saved file against a `StringBuilder`) found no mismatches. It does not yet cover undo/redo, multi-line cursor operations, or the highlighter cache.
+
+Not yet done: JMH benchmark numbers for the claims above, and an atomic (temp file plus rename) save path.
 
 Build with ❤️ by Mohammed Elmaghraby.
