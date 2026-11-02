@@ -20,7 +20,7 @@ A lightweight, zero-dependency, modal terminal text editor built entirely from s
   - Uses an action-based delta model (`EditAction`) storing only individual microscopic edits instead of heavy full-buffer snapshots.
   - Bounded custom LIFO stack (up to 1,500 actions) preventing memory leaks during long coding sessions.
 - **Safe Code Runner (`:run` / `:compile`):**
-  - Compiles and runs **Java**, **C**, **C++**, and **Python**.
+  - Compiles and runs **Java**, **C**, **C++**, **C#**, and **Python**, and runs **SQL** scripts through SQLite.
   - Uses isolated temporary build directories to keep user workspaces clean of `.class` or binary artifacts.
   - Employs signal guard protection (`SigintGuard`) via Java reflection to prevent `Ctrl+C` from closing the editor while running user programs.
 
@@ -31,7 +31,7 @@ A lightweight, zero-dependency, modal terminal text editor built entirely from s
 ### 1. Interactive File Tree Sidebar
 - Toggleable file tree viewer mapped to `Ctrl+B` or `:tree` / `:explorer`.
 - Navigate directories using arrow keys, open files with `Enter`, or switch focus seamlessly between panes and the sidebar using `Tab` or `Ctrl+W`.
-- **Nerd Font file icons:** folders (open/closed) and common file types (Java, Python, C/C++, JS/TS, JSON, HTML/CSS, Markdown, shell, images, archives, `.gitignore`, `Dockerfile`, ...) get colored icons. This needs a [Nerd Font](https://www.nerdfonts.com/font-downloads) set as your terminal's font (e.g. JetBrainsMono Nerd Font, FiraCode Nerd Font, Hack Nerd Font). Without one the icons render as empty boxes, so turn them off with `:set noicons` (back on with `:set icons`) or start the editor with `MAGHRABY_ICONS=0`.
+- **Nerd Font file icons:** folders (open/closed) and common file types (Java, Python, C/C++, C#, SQL, JS/TS, JSON, HTML/CSS, Markdown, shell, images, archives, `.gitignore`, `Dockerfile`, ...) get colored icons. This needs a [Nerd Font](https://www.nerdfonts.com/font-downloads) set as your terminal's font (e.g. JetBrainsMono Nerd Font, FiraCode Nerd Font, Hack Nerd Font). Without one the icons render as empty boxes, so turn them off with `:set noicons` (back on with `:set icons`) or start the editor with `MAGHRABY_ICONS=0`.
 
 ### 2. In-Editor File Navigation
 - Open new files or switch active buffers without leaving the editor using `:e <filename>` or `:edit <filename>`.
@@ -112,6 +112,15 @@ A lightweight, zero-dependency, modal terminal text editor built entirely from s
 - **C:** `gcc`, `clang`, or `cc` (auto-links `-lm`)
 - **C++:** `g++`, `clang++`, or `c++`
 - **Python:** `python3`, `python`, or `py` (in-memory syntax validation)
+- **C#:** `dotnet` (the .NET SDK; a throw-away project is generated around the single file, so no `.csproj` is needed), or `mcs` + `mono` as a fallback. `:compile` builds only, `:run [args]` builds and runs.
+- **SQL:** the `sqlite3` command-line shell. `:run` executes the script against a throw-away in-memory database, or against a SQLite file if you pass one (`:run mydb.sqlite`). `:compile` runs the script in memory only, to catch syntax errors without touching any data. Scripts for other databases (PostgreSQL, MySQL, SQL Server) are highlighted but must be run with their own client.
+
+### Language servers (optional, auto-detected on `PATH`)
+
+- **C#:** `csharp-ls` (also looked up in `~/.dotnet/tools`), or `OmniSharp`
+- **SQL:** `sqls` (also looked up in `~/go/bin`), or `sql-language-server`
+
+Without a language server, completion falls back to words from the file plus language keywords.
 
 ---
 

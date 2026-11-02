@@ -32,7 +32,9 @@ final class LspServers {
             case "java": return "java";
             case "c": case "h": return "c";
             case "cpp": case "cc": case "cxx": case "hpp": case "hh": return "cpp";
+            case "cs": return "csharp";
             case "py": return "python";
+            case "sql": return "sql";
             default: return null;
         }
     }
@@ -69,6 +71,28 @@ final class LspServers {
                 }
                 break;
             }
+            case "csharp": {
+                String t = CodeRunner.findTool("csharp-ls");
+                if (t == null) t = homeTool(".dotnet/tools/csharp-ls");
+                if (t != null) {
+                    cmd = list(t);
+                } else {
+                    String omni = CodeRunner.findTool("OmniSharp", "omnisharp");
+                    if (omni != null) cmd = list(omni, "-lsp");
+                }
+                break;
+            }
+            case "sql": {
+                String t = CodeRunner.findTool("sqls");
+                if (t == null) t = homeTool("go/bin/sqls");
+                if (t != null) {
+                    cmd = list(t);
+                } else {
+                    String sls = CodeRunner.findTool("sql-language-server");
+                    if (sls != null) cmd = list(sls, "up", "--method", "stdio");
+                }
+                break;
+            }
             case "java": {
                 String t = CodeRunner.findTool("jdtls");
                 if (t != null) cmd = list(t, "-data", jdtlsDataDir(rootDir).toString());
@@ -78,6 +102,12 @@ final class LspServers {
                 break;
         }
         return cmd == null ? null : new Spec(lang, cmd);
+    }
+
+    /** Absolute path of an executable under the user's home directory, or null when it is not there. */
+    private static String homeTool(String relative) {
+        File f = new File(System.getProperty("user.home", ""), relative);
+        return f.isFile() && f.canExecute() ? f.getAbsolutePath() : null;
     }
 
     /** jdtls needs a private workspace directory per project. */

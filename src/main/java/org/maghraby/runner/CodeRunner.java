@@ -19,7 +19,7 @@ import java.util.regex.Pattern;
 import java.util.stream.Stream;
 
 /**
- * Builds and executes "compile" or "compile + run" plans for Java, C, C++, and Python.
+ * Builds and executes "compile" or "compile + run" plans for Java, C, C++, C#, Python and SQL (via the sqlite3 shell).
  *
  * Planning is pure (no terminal access). Execution inherits the real terminal, so the
  * program can read stdin and print normally. Build artifacts are stored in a temporary
@@ -33,7 +33,7 @@ public final class CodeRunner {
             System.getProperty("os.name", "").toLowerCase(Locale.ROOT).contains("win");
 
     public enum Language {
-        JAVA("Java"), C("C"), CPP("C++"), PYTHON("Python");
+        JAVA("Java"), C("C"), CPP("C++"), CSHARP("C#"), PYTHON("Python"), SQL("SQL");
 
         public final String label;
         Language(String label) { this.label = label; }
@@ -87,13 +87,15 @@ public final class CodeRunner {
             case "java": return Language.JAVA;
             case "c": return Language.C;
             case "cpp": case "cc": case "cxx": return Language.CPP;
+            case "cs": return Language.CSHARP;
             case "py": return Language.PYTHON;
+            case "sql": return Language.SQL;
             default: return null;
         }
     }
 
     public static String supportedExtensions() {
-        return ".java .c .cpp .cc .cxx .py";
+        return ".java .c .cpp .cc .cxx .cs .py .sql";
     }
 
     // ------------------------------------------------------------------
@@ -178,6 +180,57 @@ public final class CodeRunner {
                     }
                     break;
                 }
+                case CSHARP: {
+                    String dotnet = findTool("dotnet");
+                    if (dotnet != null) {
+                        // Wrap the single file in a throw-away project, so no .csproj is needed next to it
+                        build = Files.createTempDirectory("maghraby-build-");
+                        Path proj = build.resolve("prog.csproj");
+                        Path out = build.resolve("out");
+                        Files.write(proj, csharpProject(file, dotnetTargetFramework(dotnet)).getBytes(StandardCharsets.UTF_8));
+
+                        steps.add(new Step("Compiling", cmd(dotnet, "build", proj.toString(), "-o", out.toString(),
+                                "-nologo", "-v", "q", "-clp:NoSummary"), false));
+                        if (run) {
+                            List<String> runCmd = cmd(dotnet, out.resolve("prog.dll").toString());
+                            runCmd.addAll(args);
+                            steps.add(new Step("Running", runCmd, true));
+                        }
+                        break;
+                    }
+                    String mcs = findTool("mcs");
+                    String mono = run ? findTool("mono") : null;
+                    if (mcs == null) {
+                        throw new RunnerException("'dotnet' not found. Install the .NET SDK (or Mono's 'mcs') and put it on PATH.");
+                    }
+                    if (run && mono == null) throw new RunnerException("'mono' not found on PATH.");
+                    build = Files.createTempDirectory("maghraby-build-");
+                    Path exe = build.resolve("prog.exe");
+                    steps.add(new Step("Compiling", cmd(mcs, "-out:" + exe, file.toString()), false));
+                    if (run) {
+                        List<String> runCmd = cmd(mono, exe.toString());
+                        runCmd.addAll(args);
+                        steps.add(new Step("Running", runCmd, true));
+                    }
+                    break;
+                }
+                case SQL: {
+                    String sqlite = findTool("sqlite3");
+                    if (sqlite == null) {
+                        throw new RunnerException("'sqlite3' not found. Install the SQLite command-line shell and put it on PATH.");
+                    }
+                    if (args.size() > 1) {
+                        throw new RunnerException("SQL takes at most one argument: the SQLite database file (default: in memory).");
+                    }
+                    // ":run db-file" executes against that database; ":compile", or ":run" with no argument, uses a
+                    // throw-away in-memory one, so nothing is ever written unless the user names a file.
+                    String db = run && !args.isEmpty() ? args.get(0) : ":memory:";
+                    if (!db.equals(":memory:")) db = Paths.get(db).toAbsolutePath().normalize().toString();
+                    String read = ".read \"" + file.toString().replace("\\", "/") + "\"";
+                    steps.add(new Step(run ? "Running" : "Checking SQL (in memory)",
+                            cmd(sqlite, "-bail", "-header", "-column", db, read), run));
+                    break;
+                }
                 case PYTHON: {
                     String python = findTool("python3", "python", "py");
                     if (python == null) {
@@ -204,6 +257,51 @@ public final class CodeRunner {
             deleteQuietly(build);
             throw e;
         }
+    }
+
+    /** Picks the newest target framework the installed SDK supports, e.g. "net8.0". */
+    private static String dotnetTargetFramework(String dotnet) {
+        try {
+            Process p = new ProcessBuilder(dotnet, "--version")
+                    .redirectErrorStream(true).start();
+            String out;
+            try (java.io.InputStream in = p.getInputStream()) {
+                out = new String(in.readAllBytes(), StandardCharsets.UTF_8).trim();
+            }
+            if (!p.waitFor(20, java.util.concurrent.TimeUnit.SECONDS)) p.destroyForcibly();
+            Matcher m = Pattern.compile("^(\\d+)\\.").matcher(out);
+            if (m.find()) {
+                int major = Integer.parseInt(m.group(1));
+                if (major >= 5) return "net" + major + ".0";
+            }
+        } catch (IOException | RuntimeException e) {
+            // fall through to the default
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+        return "net8.0";
+    }
+
+    /** A minimal console-app project that compiles just {@code source}. */
+    static String csharpProject(Path source, String targetFramework) {
+        return "<Project Sdk=\"Microsoft.NET.Sdk\">\n"
+                + "  <PropertyGroup>\n"
+                + "    <OutputType>Exe</OutputType>\n"
+                + "    <TargetFramework>" + targetFramework + "</TargetFramework>\n"
+                + "    <AssemblyName>prog</AssemblyName>\n"
+                + "    <ImplicitUsings>enable</ImplicitUsings>\n"
+                + "    <Nullable>disable</Nullable>\n"
+                + "    <UseAppHost>false</UseAppHost>\n"
+                + "    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>\n"
+                + "  </PropertyGroup>\n"
+                + "  <ItemGroup>\n"
+                + "    <Compile Include=\"" + xmlEscape(source.toString()) + "\" />\n"
+                + "  </ItemGroup>\n"
+                + "</Project>\n";
+    }
+
+    private static String xmlEscape(String s) {
+        return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("\"", "&quot;");
     }
 
     /** Syntax check without writing __pycache__ and with a compact one-line error. */
@@ -245,15 +343,17 @@ public final class CodeRunner {
 
                 if (step.isRun) {
                     out.println();
+                    String what = plan.language == Language.SQL ? "Script" : "Program";
                     out.println((code == 0 ? "\u001b[32m" : "\u001b[31m")
-                            + "[Program exited with code " + code + "]\u001b[0m");
-                    summary = plan.language.label + " program exited with code " + code + ".";
+                            + "[" + what + " exited with code " + code + "]\u001b[0m");
+                    summary = plan.language.label + " " + what.toLowerCase(Locale.ROOT) + " exited with code " + code + ".";
                 } else if (code != 0) {
                     out.println();
                     out.println("\u001b[31m[" + step.title + " failed, exit code " + code + "]\u001b[0m");
                     return plan.language.label + ": " + step.title.toLowerCase(Locale.ROOT) + " failed (exit " + code + ").";
                 } else {
-                    summary = plan.language.label + ": " + (plan.language == Language.PYTHON ? "syntax OK." : "compiled OK.");
+                    summary = plan.language.label + ": " + (plan.language == Language.PYTHON ? "syntax OK."
+                            : plan.language == Language.SQL ? "script OK." : "compiled OK.");
                     if (!plan.run) out.println("\u001b[32m[" + summary + "]\u001b[0m");
                 }
                 out.flush();

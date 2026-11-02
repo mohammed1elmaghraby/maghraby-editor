@@ -198,6 +198,8 @@ public final class Renderer {
             case "py": case "pyw": return "Python";
             case "c": case "h": return "C";
             case "cpp": case "cc": case "cxx": case "hpp": case "hh": return "C++";
+            case "cs": case "csx": return "C#";
+            case "sql": return "SQL";
             case "js": case "mjs": case "cjs": return "JavaScript";
             case "ts": return "TypeScript";
             case "json": return "JSON";

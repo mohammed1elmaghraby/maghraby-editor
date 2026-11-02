@@ -8,6 +8,8 @@ import org.maghraby.core.Doc;
 import org.maghraby.core.State;
 import org.maghraby.core.TextEditor;
 
+import javax.swing.*;
+
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 
 class RenderSmokeTest {

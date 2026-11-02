@@ -3,12 +3,13 @@ package org.maghraby.syntax;
 import java.util.Set;
 
 /**
- * Syntax highlighter for C-family languages (Java, C, C++) using ANSI escape codes.
+ * Syntax highlighter for C-family languages (Java, C, C++, C#) using ANSI escape codes.
  *
  * Highlights keywords, primitive types, class/type names, constants (true, null, MAX_SIZE), function
  * calls, names being defined (class Foo), annotations, numbers, strings with coloured escapes,
  * comments, documentation comments with their @tags, preprocessor lines with #include headers, and
- * Java text blocks.
+ * Java text blocks. For C# it also handles verbatim (@"...") and interpolated ($"...") strings,
+ * {@code ///} XML documentation comments and {@code #region}-style directives.
  */
 public class CLikeHighlighter implements SyntaxHighlighter {
 
@@ -18,7 +19,11 @@ public class CLikeHighlighter implements SyntaxHighlighter {
 
     private static final Set<String> CONSTANTS = Set.of("true", "false", "null", "nullptr", "NULL");
 
-    private static final Set<String> SELF = Set.of("this", "super");
+    /** Extra built-in type keywords that only exist in C#. */
+    private static final Set<String> CSHARP_PRIMITIVES = Set.of(
+            "string", "object", "decimal", "sbyte", "ushort", "uint", "ulong", "nint", "nuint", "dynamic");
+
+    private static final Set<String> SELF = Set.of("this", "super", "base");
 
     /** Keywords after which the next identifier is the name being defined. */
     private static final Set<String> DEFINERS = Set.of(
@@ -27,12 +32,14 @@ public class CLikeHighlighter implements SyntaxHighlighter {
     private final Set<String> supportedExtensions;
     private final Set<String> keywords;
     private final boolean preprocessor;
+    private final boolean csharp;
 
     public CLikeHighlighter(Set<String> supportedExtensions, Set<String> keywords) {
         this.supportedExtensions = supportedExtensions;
         this.keywords = keywords;
+        this.csharp = supportedExtensions.contains("cs");
         this.preprocessor = supportedExtensions.contains("c") || supportedExtensions.contains("cpp")
-                || supportedExtensions.contains("h");
+                || supportedExtensions.contains("h") || csharp;
     }
 
     @Override
@@ -60,6 +67,14 @@ public class CLikeHighlighter implements SyntaxHighlighter {
             String part = line.substring(0, end + 2);
             em.put(color, doc ? Theme.docWithTags(part) : part);
             i = end + 2;
+        } else if (state == HighlightState.C_VERBATIM) {
+            int end = verbatimEnd(line, 0);
+            if (end == -1) {
+                em.put(Theme.STRING, line);
+                return new HighlightResult(em.finish(), state);
+            }
+            em.put(Theme.STRING, line.substring(0, end));
+            i = end;
         } else if (state == HighlightState.C_TEXT_BLOCK) {
             int end = findUnescaped(line, "\"\"\"", 0);
             if (end == -1) {
@@ -75,7 +90,8 @@ public class CLikeHighlighter implements SyntaxHighlighter {
 
             // Single-line comment
             if (line.startsWith("//", i)) {
-                em.put(Theme.COMMENT, line.substring(i));
+                boolean xmlDoc = csharp && line.startsWith("///", i) && !line.startsWith("////", i);
+                em.put(xmlDoc ? Theme.DOC : Theme.COMMENT, line.substring(i));
                 i = n;
             }
             // Block / documentation comment
@@ -111,6 +127,32 @@ public class CLikeHighlighter implements SyntaxHighlighter {
                     }
                 }
             }
+            // C# string prefixes: @"verbatim", $"interpolated", $@"both"
+            else if (csharp && (c == '@' || c == '$') && stringPrefixEnd(line, i) > 0) {
+                int q = stringPrefixEnd(line, i); // index of the opening quote
+                boolean verbatim = line.substring(i, q).indexOf('@') >= 0;
+                em.put(Theme.STRING, line.substring(i, q));
+                if (verbatim && !line.startsWith("\"\"\"", q)) {
+                    int end = verbatimEnd(line, q + 1);
+                    if (end == -1) {
+                        em.put(Theme.STRING, line.substring(q));
+                        next = HighlightState.C_VERBATIM;
+                        i = n;
+                    } else {
+                        em.put(Theme.STRING, line.substring(q, end));
+                        i = end;
+                    }
+                } else {
+                    i = q; // ordinary / raw string body is handled by the branches below
+                }
+            }
+            // C# verbatim identifier: @class
+            else if (csharp && c == '@' && Character.isJavaIdentifierStart(peek(line, i + 1))) {
+                int end = i + 1;
+                while (end < n && Character.isJavaIdentifierPart(line.charAt(end))) end++;
+                em.put(Theme.PLAIN, line.substring(i, end));
+                i = end;
+            }
             // Annotation: @Override
             else if (c == '@' && Character.isJavaIdentifierStart(peek(line, i + 1))) {
                 int end = i + 1;
@@ -145,7 +187,7 @@ public class CLikeHighlighter implements SyntaxHighlighter {
             }
             // Numeric literals
             else if (Character.isDigit(c) || (c == '.' && Character.isDigit(peek(line, i + 1)))) {
-                int end = scanNumber(line, i);
+                int end = scanNumber(line, i, csharp);
                 em.put(Theme.NUMBER, line.substring(i, end));
                 i = end;
             }
@@ -164,7 +206,7 @@ public class CLikeHighlighter implements SyntaxHighlighter {
                     color = Theme.CONSTANT;
                 } else if (SELF.contains(word)) {
                     color = Theme.VARIABLE;
-                } else if (PRIMITIVES.contains(word)) {
+                } else if (PRIMITIVES.contains(word) || (csharp && CSHARP_PRIMITIVES.contains(word))) {
                     color = Theme.TYPE;
                 } else if (keywords.contains(word)) {
                     color = Theme.KEYWORD;
@@ -196,7 +238,7 @@ public class CLikeHighlighter implements SyntaxHighlighter {
         return new HighlightResult(em.finish(), next);
     }
 
-    private static int scanNumber(String line, int i) {
+    private static int scanNumber(String line, int i, boolean decimalSuffix) {
         int n = line.length();
         int end = i + 1;
         char c = line.charAt(i);
@@ -214,13 +256,37 @@ public class CLikeHighlighter implements SyntaxHighlighter {
                     || ((peek(line, end + 1) == '+' || peek(line, end + 1) == '-') && Character.isDigit(peek(line, end + 2))))) {
                 end += 2; // exponent such as 1e9 or 2.5e-3
             } else if (ch == 'f' || ch == 'F' || ch == 'l' || ch == 'L' || ch == 'd' || ch == 'D'
-                    || ch == 'u' || ch == 'U' || ch == '_') {
+                    || ch == 'u' || ch == 'U' || ch == '_'
+                    || (decimalSuffix && (ch == 'm' || ch == 'M'))) {
                 end++;
             } else {
                 break;
             }
         }
         return end;
+    }
+
+    /**
+     * If a C# string prefix ({@code @}, {@code $}, {@code $@}, {@code @$}) starts at {@code i} and is
+     * followed by a double quote, returns the index of that quote; otherwise -1.
+     */
+    private static int stringPrefixEnd(String line, int i) {
+        int p = i;
+        while (p < line.length() && p - i < 2 && (line.charAt(p) == '@' || line.charAt(p) == '$')) p++;
+        return p < line.length() && line.charAt(p) == '"' ? p : -1;
+    }
+
+    /** Index just after the closing quote of a verbatim string body starting at {@code from}, or -1. */
+    private static int verbatimEnd(String line, int from) {
+        int i = from;
+        while (i < line.length()) {
+            if (line.charAt(i) == '"') {
+                if (peek(line, i + 1) == '"') { i += 2; continue; } // "" is an escaped quote
+                return i + 1;
+            }
+            i++;
+        }
+        return -1;
     }
 
     private static int findUnescaped(String line, String needle, int from) {

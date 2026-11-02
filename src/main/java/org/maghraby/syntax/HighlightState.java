@@ -21,5 +21,9 @@ public enum HighlightState {
     /** Previous line ended with a backslash while a command name was still expected (after | or &&). */
     BASH_CONT_CMD,
     /** Previous line ended with a backslash in the middle of a command's arguments. */
-    BASH_CONT_ARG
+    BASH_CONT_ARG,
+    /** Inside a C# verbatim string (@"...") that continues over several lines. */
+    C_VERBATIM,
+    /** Inside a SQL single-quoted string that continues over several lines. */
+    SQL_STRING
 }

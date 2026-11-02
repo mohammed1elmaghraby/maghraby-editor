@@ -21,6 +21,9 @@ class AutocompleteTest {
         String[] pyKeywords = Autocomplete.keywordsFor("script.py");
         assertTrue(pyKeywords.length > 0);
         assertTrue(List.of(pyKeywords).contains("def"));
+
+        assertTrue(List.of(Autocomplete.keywordsFor("Program.cs")).contains("foreach"));
+        assertTrue(List.of(Autocomplete.keywordsFor("schema.sql")).contains("SELECT"));
     }
 
     @Test

@@ -36,6 +36,8 @@ public final class FileIcons {
     private static final Map<String, Icon> BY_EXT = new HashMap<>();
 
     static {
+        BY_EXT.put("csv", new Icon('\uf1c3', 114));
+
         // --- exact file names (lower-case) ---
         BY_NAME.put("dockerfile", new Icon('', 39));
         BY_NAME.put(".gitignore", new Icon('', 202));
@@ -63,6 +65,8 @@ public final class FileIcons {
         BY_EXT.put("cxx", cpp);
         BY_EXT.put("hpp", cpp);
         BY_EXT.put("hh", cpp);
+        BY_EXT.put("cs", new Icon('\ue648', 70));
+        BY_EXT.put("csx", new Icon('\ue648', 70));
         Icon js = new Icon('', 221);
         BY_EXT.put("js", js);
         BY_EXT.put("mjs", js);

@@ -105,6 +105,25 @@ public final class Autocomplete {
             "signed", "sizeof", "static", "struct", "switch", "typedef", "union", "unsigned", "void",
             "volatile", "while", "printf", "scanf", "malloc", "free", "std", "string", "vector", "cout", "cin"};
 
+    public static final String[] CSHARP_WORDS = {
+            "abstract", "async", "await", "base", "bool", "break", "byte", "case", "catch", "char", "class",
+            "const", "continue", "decimal", "default", "delegate", "do", "double", "else", "enum", "event",
+            "false", "finally", "float", "for", "foreach", "get", "if", "in", "int", "interface", "internal",
+            "is", "lock", "long", "namespace", "new", "null", "object", "out", "override", "partial",
+            "private", "protected", "public", "readonly", "record", "ref", "return", "sealed", "set", "static",
+            "string", "struct", "switch", "this", "throw", "true", "try", "using", "var", "virtual", "void",
+            "while", "yield", "Console", "WriteLine", "ReadLine", "List", "Dictionary", "Task", "IEnumerable",
+            "Linq", "String", "Math", "Exception"};
+
+    public static final String[] SQL_WORDS = {
+            "SELECT", "FROM", "WHERE", "GROUP BY", "ORDER BY", "HAVING", "LIMIT", "OFFSET", "DISTINCT", "AS",
+            "JOIN", "INNER", "LEFT", "RIGHT", "FULL", "OUTER", "CROSS", "ON", "USING", "UNION", "INTERSECT",
+            "EXCEPT", "INSERT", "INTO", "VALUES", "UPDATE", "SET", "DELETE", "CREATE", "ALTER", "DROP",
+            "TABLE", "VIEW", "INDEX", "DATABASE", "PRIMARY", "KEY", "FOREIGN", "REFERENCES", "UNIQUE",
+            "DEFAULT", "NOT", "NULL", "AND", "OR", "IN", "BETWEEN", "LIKE", "EXISTS", "CASE", "WHEN", "THEN",
+            "ELSE", "END", "COUNT", "SUM", "AVG", "MIN", "MAX", "COALESCE", "CAST", "BEGIN", "COMMIT",
+            "ROLLBACK", "TRANSACTION", "INTEGER", "VARCHAR", "TEXT", "BOOLEAN", "TIMESTAMP", "DATE", "ASC", "DESC"};
+
     public static final String[] PY_WORDS = {
             "and", "as", "assert", "break", "class", "continue", "def", "del", "elif", "else", "except",
             "finally", "for", "from", "global", "if", "import", "in", "is", "lambda", "None", "not", "or",
@@ -117,6 +136,8 @@ public final class Autocomplete {
         switch (l) {
             case JAVA: return JAVA_WORDS;
             case C: case CPP: return C_WORDS;
+            case CSHARP: return CSHARP_WORDS;
+            case SQL: return SQL_WORDS;
             case PYTHON: return PY_WORDS;
             default: return new String[0];
         }
