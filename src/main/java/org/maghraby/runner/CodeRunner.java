@@ -1,10 +1,10 @@
 package org.maghraby.runner;
 
+import org.maghraby.ui.TerminalSignals;
+
 import java.io.File;
 import java.io.IOException;
 import java.io.PrintStream;
-import java.lang.reflect.Method;
-import java.lang.reflect.Proxy;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -321,10 +321,10 @@ public final class CodeRunner {
      * Runs the plan on the real terminal. Returns a one-line summary for the status bar.
      * Never throws for ordinary failures (compile errors, non-zero exit...).
      */
-    @SuppressWarnings("try") // Guard is only used for its close(): it restores the previous SIGINT handler
+    @SuppressWarnings("try") // Registration restores the previous SIGINT handler on close.
     public static String execute(Plan plan, PrintStream out) {
         String summary = "Done.";
-        try (SigintGuard ignored = SigintGuard.install()) {
+        try (TerminalSignals.Registration ignored = TerminalSignals.ignoreInterruptTemporarily()) {
             for (Step step : plan.steps) {
                 out.println("\u001b[1;36m$ " + shellJoin(step.command) + "\u001b[0m");
                 out.flush();
@@ -458,44 +458,4 @@ public final class CodeRunner {
         } catch (IOException ignored) { }
     }
 
-    /**
-     * Prevents Ctrl+C (SIGINT) from killing the editor when the user program is running.
-     * Replaces the handler temporarily and restores it upon closing.
-     */
-    private static final class SigintGuard implements AutoCloseable {
-        private Object signal;
-        private Object previous;
-        private Method handle;
-
-        static SigintGuard install() {
-            SigintGuard guard = new SigintGuard();
-            try {
-                Class<?> signalClass = Class.forName("sun.misc.Signal");
-                Class<?> handlerClass = Class.forName("sun.misc.SignalHandler");
-                Object noop = Proxy.newProxyInstance(handlerClass.getClassLoader(), new Class<?>[]{handlerClass},
-                        (proxy, method, a) -> {
-                            switch (method.getName()) {
-                                case "hashCode": return System.identityHashCode(proxy);
-                                case "equals": return proxy == a[0];
-                                case "toString": return "NoopSigintHandler";
-                                default: return null;
-                            }
-                        });
-                guard.handle = signalClass.getMethod("handle", signalClass, handlerClass);
-                guard.signal = signalClass.getConstructor(String.class).newInstance("INT");
-                guard.previous = guard.handle.invoke(null, guard.signal, noop);
-            } catch (Throwable t) {
-                guard.signal = null;
-            }
-            return guard;
-        }
-
-        @Override
-        public void close() {
-            if (signal == null) return;
-            try {
-                handle.invoke(null, signal, previous);
-            } catch (Throwable ignored) { }
-        }
-    }
 }
