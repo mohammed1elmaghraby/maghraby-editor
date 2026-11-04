@@ -56,9 +56,75 @@ public final class Commands {
         return ok;
     }
 
+    // ------------------------------------------------------------------
+    // Search: /text, :find text, n / N
+    // ------------------------------------------------------------------
+
+    private static String lastSearch = "";
+
+    /** Starts a search from the cursor. An empty pattern repeats the previous one. */
+    public static void searchCommand(String pattern) {
+        if (!pattern.isEmpty()) lastSearch = pattern;
+        if (lastSearch.isEmpty()) {
+            statusMessage = "Usage: /text  or  :find text   (n = next, N = previous)";
+            return;
+        }
+        findNext(true);
+    }
+
+    /**
+     * Moves the cursor to the next (or previous) occurrence of the last search, wrapping around the
+     * file. Plain text, not a regex; case-insensitive unless the pattern contains an upper-case letter.
+     */
+    public static void findNext(boolean forward) {
+        if (lastSearch.isEmpty()) {
+            statusMessage = "No previous search. Use /text or :find text";
+            return;
+        }
+        final java.util.Locale root = java.util.Locale.ROOT;
+        boolean ignoreCase = lastSearch.equals(lastSearch.toLowerCase(root));
+        String needle = ignoreCase ? lastSearch.toLowerCase(root) : lastSearch;
+        int count = ed().getLineCount();
+        int startRow = Math.min(cursorRow, count - 1);
+        int startCol = cursorCol;
+
+        // i == 0 is the rest of the current line, i == count is the start of it again after wrapping.
+        for (int i = 0; i <= count; i++) {
+            int row = forward ? (startRow + i) % count : ((startRow - i) % count + count) % count;
+            String line = ed().getLine(row);
+            if (ignoreCase) line = line.toLowerCase(root);
+
+            int idx;
+            if (forward) {
+                int from = i == 0 ? startCol + 1 : 0;
+                idx = from <= line.length() ? line.indexOf(needle, from) : -1;
+                if (i == count && idx > startCol) idx = -1; // wrapped back: only up to where we began
+            } else {
+                int from = i == 0 ? startCol - 1 : line.length();
+                idx = from >= 0 ? line.lastIndexOf(needle, from) : -1;
+                if (i == count && idx < startCol) idx = -1;
+            }
+
+            if (idx >= 0) {
+                boolean wrapped = i > 0 && (forward ? row <= startRow : row >= startRow);
+                cursorRow = row;
+                cursorCol = idx;
+                goalCol = idx;
+                statusMessage = "/" + lastSearch + "   line " + (row + 1)
+                        + (wrapped ? "   (search wrapped)" : "");
+                return;
+            }
+        }
+        statusMessage = "Not found: " + lastSearch;
+    }
+
     public static void executeCommand(String cmdLine) {
         if (cmdLine.isEmpty()) {
             statusMessage = "NORMAL MODE";
+            return;
+        }
+        if (cmdLine.charAt(0) == '/') { // "/text" typed in Normal mode
+            searchCommand(cmdLine.substring(1));
             return;
         }
         String[] parts = cmdLine.split("\\s+", 2);
@@ -115,8 +181,16 @@ public final class Commands {
                 } else if (arg.equals("noautopair") || arg.equals("nopairs")) {
                     autoPairs = false;
                     statusMessage = "Auto-closing pairs off.";
+                } else if (arg.equals("inlinediag") || arg.equals("diag")) {
+                    inlineDiagnostics = true;
+                    needsRedraw = true;
+                    statusMessage = "Inline diagnostics on.";
+                } else if (arg.equals("noinlinediag") || arg.equals("nodiag")) {
+                    inlineDiagnostics = false;
+                    needsRedraw = true;
+                    statusMessage = "Inline diagnostics off.";
                 } else {
-                    statusMessage = "Unknown option: " + arg + "   (rnu, nornu, icons, noicons, autopair, noautopair)";
+                    statusMessage = "Unknown option: " + arg + "   (rnu, nornu, icons, noicons, autopair, noautopair, inlinediag, noinlinediag)";
                 }
                 break;
             case "e": case "edit": openFile(arg, false); break;
@@ -130,6 +204,7 @@ public final class Commands {
                     else statusMessage = "Not a directory: " + arg;
                 }
                 break;
+            case "find": case "search": searchCommand(arg); break;
             case "goto": case "go": case "g": gotoLine(arg); break;
             case "help": case "h": statusMessage = HELP; break;
             default:

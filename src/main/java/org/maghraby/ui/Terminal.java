@@ -93,7 +93,7 @@ public final class Terminal {
 
     public static void enterEditorScreen() {
         stty("raw -echo");
-        out.print(ANSI_ENTER_ALT_SCREEN + ANSI_CLEAR_SCREEN + ANSI_HIDE_CURSOR);
+        out.print(ANSI_ENTER_ALT_SCREEN + ANSI_PASTE_ON + ANSI_CLEAR_SCREEN + ANSI_HIDE_CURSOR);
         out.flush();
     }
 
@@ -102,7 +102,7 @@ public final class Terminal {
         synchronized (RENDER_LOCK) {
             renderPaused = true;
         }
-        out.print(ANSI_RESET + ESC + "[0 q" + ANSI_SHOW_CURSOR + ANSI_LEAVE_ALT_SCREEN);
+        out.print(ANSI_RESET + ESC + "[0 q" + ANSI_SHOW_CURSOR + ANSI_PASTE_OFF + ANSI_LEAVE_ALT_SCREEN);
         out.flush();
         stty(originalStty);
     }
@@ -110,7 +110,7 @@ public final class Terminal {
     /** Regains terminal control after a user program exits. */
     public static void resumeTerminal() {
         stty("raw -echo");
-        out.print(ANSI_ENTER_ALT_SCREEN + ANSI_CLEAR_SCREEN + ANSI_HIDE_CURSOR);
+        out.print(ANSI_ENTER_ALT_SCREEN + ANSI_PASTE_ON + ANSI_CLEAR_SCREEN + ANSI_HIDE_CURSOR);
         out.flush();
         updateTerminalSize();
         forceClear.set(true);
@@ -120,7 +120,7 @@ public final class Terminal {
 
     public static void restoreTerminal() {
         if (!terminalRestored.compareAndSet(false, true)) return;
-        out.print(ANSI_RESET + ESC + "[0 q" + ANSI_SHOW_CURSOR + ANSI_LEAVE_ALT_SCREEN);
+        out.print(ANSI_RESET + ESC + "[0 q" + ANSI_SHOW_CURSOR + ANSI_PASTE_OFF + ANSI_LEAVE_ALT_SCREEN);
         out.flush();
         if (originalStty != null) {
             if (stty(originalStty) == null) stty("sane");

@@ -43,7 +43,7 @@ public final class LspClient implements AutoCloseable {
         public final String message;
         public final String source;
 
-        Diagnostic(int line, int col, int endLine, int endCol, int severity, String message, String source) {
+        public Diagnostic(int line, int col, int endLine, int endCol, int severity, String message, String source) {
             this.line = line;
             this.col = col;
             this.endLine = endLine;

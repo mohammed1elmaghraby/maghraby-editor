@@ -150,9 +150,53 @@ public final class Input {
                     case "5": handlePage(-1); break;
                     case "6": handlePage(1); break;
                     case "15": runCommand(true, ""); break;       // F5
+                    case "200": handlePaste(in); break;           // Start of a bracketed paste
                 }
                 break;
         }
+    }
+
+    /**
+     * Bracketed paste: everything up to ESC[201~ is inserted verbatim as ONE edit. Going through
+     * handleEnter/handleText per character would stack auto-indent on the pasted indentation
+     * (every line drifting further right), auto-close brackets and pop completion menus.
+     */
+    static void handlePaste(InputStream in) throws IOException {
+        final byte[] end = {27, '[', '2', '0', '1', '~'};
+        java.io.ByteArrayOutputStream buf = new java.io.ByteArrayOutputStream();
+        int matched = 0; // length of the end marker seen so far
+        while (true) {
+            int c = readTimeout(in, 1000);
+            if (c == -1) break; // marker lost: take what arrived
+            buf.write(c);
+            matched = (c == end[matched]) ? matched + 1 : (c == end[0] ? 1 : 0);
+            if (matched == end.length) {
+                byte[] all = buf.toByteArray();
+                buf.reset();
+                buf.write(all, 0, all.length - end.length);
+                break;
+            }
+        }
+
+        // Normalise line endings, drop control characters other than newline and tab.
+        String text = new String(buf.toByteArray(), StandardCharsets.UTF_8)
+                .replace("\r\n", "\n").replace('\r', '\n');
+        StringBuilder clean = new StringBuilder(text.length());
+        for (int i = 0; i < text.length(); i++) {
+            char ch = text.charAt(i);
+            if (ch == '\n' || ch == '\t' || (ch >= 32 && ch != 127)) clean.append(ch);
+        }
+        if (clean.length() == 0) return;
+
+        if (currentMode == Mode.INSERT) {
+            if (showingSuggestions) closeSuggestions(); else if (D().lsp != null) D().lsp.cancelSuggestions();
+            int[] pos = ed().insertAt(cursorRow, cursorCol, clean.toString());
+            cursorRow = pos[0];
+            cursorCol = pos[1];
+        } else if (currentMode == Mode.COMMAND) {
+            commandInput.append(clean.toString().replace('\n', ' '));
+        }
+        // NORMAL mode: ignore, otherwise pasted letters would run as commands (e.g. 'q' quits).
     }
 
     public static void handleText(String s) {
@@ -179,6 +223,15 @@ public final class Input {
                 currentMode = Mode.COMMAND;
                 commandInput.setLength(0);
                 statusMessage = "Command mode: " + HELP;
+            } else if (c == '/') {
+                currentMode = Mode.COMMAND;
+                commandInput.setLength(0);
+                commandInput.append('/'); // the prompt shows "/", Enter runs the search
+                statusMessage = "Search: type text, Enter to find (n/N = next/previous)";
+            } else if (c == 'n') {
+                findNext(true);
+            } else if (c == 'N') {
+                findNext(false);
             } else if (c == 'u') {
                 int[] pos = {cursorRow, cursorCol};
                 statusMessage = ed().undo(pos);

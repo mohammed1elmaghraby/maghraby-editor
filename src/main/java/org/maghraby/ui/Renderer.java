@@ -74,6 +74,38 @@ public final class Renderer {
         return best;
     }
 
+    /** The most severe diagnostic that STARTS on `row` (multi-line ones are shown on their first line only). */
+    public static LspClient.Diagnostic diagnosticStartingAt(List<LspClient.Diagnostic> diags, int row) {
+        LspClient.Diagnostic best = null;
+        for (LspClient.Diagnostic d : diags) {
+            if (d.line != row) continue;
+            if (best == null || d.severity < best.severity) best = d;
+        }
+        return best;
+    }
+
+    /** Alpha of the severity colour over the editor background for the inline diagnostic band. */
+    public static final double DIAG_BG_ALPHA = 0.16;
+    public static final double DIAG_FG_ALPHA = 0.90;
+
+    /**
+     * The inline diagnostic ("error lens"): `room` columns of semi-transparent tinted background holding
+     * the first line of the message. Always exactly `room` visible columns wide.
+     */
+    public static String inlineDiagnostic(LspClient.Diagnostic d, int room) {
+        int[] sev = xtermRgb(severityColor(d.severity));
+        String icon = d.severity == 1 ? "●" : d.severity == 2 ? "▲" : d.severity == 3 ? "•" : "◦";
+        String msg = d.message == null ? "" : d.message.trim();
+        int nl = msg.indexOf('\n');
+        if (nl >= 0) msg = msg.substring(0, nl);
+        String text = " " + icon + " " + sanitize(msg.replace('\t', ' ').replace('\r', ' '));
+        text = clip(text, room - 1);
+        return rgbBg(blend(sev, EDITOR_BG, DIAG_BG_ALPHA))
+                + rgbFg(blend(sev, EDITOR_BG, DIAG_FG_ALPHA))
+                + text + spaces(room - text.length())
+                + ANSI_RESET;
+    }
+
     public static int severityColor(int severity) {
         return severity == 1 ? 203 : severity == 2 ? 214 : severity == 3 ? 81 : 245;
     }
@@ -322,10 +354,19 @@ public final class Renderer {
             HighlightResult hr = highlighter.highlightLine(display, state);
             state = hr.nextState;
             sb.append(sliceAnsi(hr.coloredLine, left, textCols));
+            int printed = Math.max(0, Math.min(textCols, display.length() - left));
+            if (inlineDiagnostics) {
+                // The message sits on the same row as the problem, after the code, on a tinted background.
+                LspClient.Diagnostic gd = diagnosticStartingAt(diags, lineIdx);
+                int room = textCols - printed - 2;
+                if (gd != null && room >= 8) {
+                    sb.append("  ").append(inlineDiagnostic(gd, room));
+                    continue; // the band reaches the pane edge: nothing left to erase or pad
+                }
+            }
             if (eraseEol) {
                 sb.append(ESC).append("[K");
             } else {
-                int printed = Math.max(0, Math.min(textCols, display.length() - left));
                 sb.append(spaces(textCols - printed));
             }
         }
@@ -502,9 +543,10 @@ public final class Renderer {
         sb.append(ESC).append('[').append(rows).append(";1H").append(ANSI_CLEAR_LINE);
         String cursorSeq;
         if (mode == Mode.COMMAND) {
-            String shown = ":" + sanitize(command);
+            boolean searching = command.startsWith("/"); // "/text": show a "/" prompt instead of ":"
+            String shown = (searching ? "" : ":") + sanitize(command);
             if (shown.length() > cols - 1) shown = shown.substring(shown.length() - (cols - 1));
-            sb.append(fg(177)).append(BOLD).append(':').append(BOLD_OFF).append(FG_DEFAULT).append(shown, 1, shown.length());
+            sb.append(fg(177)).append(BOLD).append(searching ? '/' : ':').append(BOLD_OFF).append(FG_DEFAULT).append(shown, 1, shown.length());
             cursorSeq = ESC + "[" + rows + ";" + Math.min(shown.length() + 1, cols) + "H";
         } else {
             boolean isHint = shownStatus.equals(hint) || shownStatus.equals(DEFAULT_STATUS);

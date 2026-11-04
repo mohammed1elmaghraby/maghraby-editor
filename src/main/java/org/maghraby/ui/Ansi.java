@@ -16,6 +16,9 @@ public final class Ansi {
     public static final String ANSI_CLEAR_LINE = ESC + "[2K";
     public static final String ANSI_ENTER_ALT_SCREEN = ESC + "[?1049h";
     public static final String ANSI_LEAVE_ALT_SCREEN = ESC + "[?1049l";
+    /** Bracketed paste: the terminal wraps pasted text in ESC[200~ ... ESC[201~ so it is not mistaken for typing. */
+    public static final String ANSI_PASTE_ON = ESC + "[?2004h";
+    public static final String ANSI_PASTE_OFF = ESC + "[?2004l";
 
     // --- Colour helpers (256-colour palette) ---
     public static final String BOLD = ESC + "[1m";
@@ -26,6 +29,88 @@ public final class Ansi {
     public static String fg(int n) { return ESC + "[38;5;" + n + "m"; }
 
     public static String bg(int n) { return ESC + "[48;5;" + n + "m"; }
+
+    // --- True colour and alpha blending ---
+    // A terminal has no real transparency, so "alpha" is computed here: result = top*a + base*(1-a).
+
+    /** True when the terminal advertises 24-bit colour (COLORTERM=truecolor|24bit); else 256 colours are used. */
+    public static final boolean TRUECOLOR = detectTrueColor();
+
+    /** Assumed editor background, the colour tints are blended onto. Override with MEDIT_BG=#rrggbb. */
+    public static final int[] EDITOR_BG = parseHex(System.getenv("MEDIT_BG"), new int[]{30, 30, 30});
+
+    private static boolean detectTrueColor() {
+        String ct = System.getenv("COLORTERM");
+        if (ct == null) return false;
+        ct = ct.toLowerCase(java.util.Locale.ROOT);
+        return ct.contains("truecolor") || ct.contains("24bit");
+    }
+
+    private static int[] parseHex(String hex, int[] fallback) {
+        if (hex == null) return fallback;
+        String h = hex.startsWith("#") ? hex.substring(1) : hex;
+        if (h.length() != 6) return fallback;
+        try {
+            int v = Integer.parseInt(h, 16);
+            return new int[]{(v >> 16) & 255, (v >> 8) & 255, v & 255};
+        } catch (NumberFormatException e) {
+            return fallback;
+        }
+    }
+
+    /** RGB of an xterm 256-colour palette index. */
+    public static int[] xtermRgb(int n) {
+        if (n < 16) {
+            int[][] base = {{0, 0, 0}, {205, 0, 0}, {0, 205, 0}, {205, 205, 0}, {0, 0, 238}, {205, 0, 205},
+                    {0, 205, 205}, {229, 229, 229}, {127, 127, 127}, {255, 0, 0}, {0, 255, 0}, {255, 255, 0},
+                    {92, 92, 255}, {255, 0, 255}, {0, 255, 255}, {255, 255, 255}};
+            return base[Math.max(0, n)].clone();
+        }
+        if (n >= 232) {
+            int g = 8 + 10 * (Math.min(n, 255) - 232);
+            return new int[]{g, g, g};
+        }
+        int i = n - 16;
+        int[] lv = {0, 95, 135, 175, 215, 255};
+        return new int[]{lv[i / 36], lv[(i / 6) % 6], lv[i % 6]};
+    }
+
+    /** Alpha blend: `alpha` (0..1) of `top` over `base`. */
+    public static int[] blend(int[] top, int[] base, double alpha) {
+        double a = Math.max(0, Math.min(1, alpha));
+        int[] r = new int[3];
+        for (int i = 0; i < 3; i++) r[i] = (int) Math.round(top[i] * a + base[i] * (1 - a));
+        return r;
+    }
+
+    private static int nearest256(int[] c) {
+        int[] lv = {0, 95, 135, 175, 215, 255};
+        int[] idx = new int[3];
+        for (int k = 0; k < 3; k++) {
+            int best = 0;
+            for (int j = 1; j < 6; j++) if (Math.abs(lv[j] - c[k]) < Math.abs(lv[best] - c[k])) best = j;
+            idx[k] = best;
+        }
+        int cube = 16 + 36 * idx[0] + 6 * idx[1] + idx[2];
+        int gray = (c[0] + c[1] + c[2]) / 3;
+        int gi = Math.max(0, Math.min(23, Math.round((gray - 8) / 10f)));
+        int[] cc = xtermRgb(cube), gg = xtermRgb(232 + gi);
+        return dist(c, gg) < dist(c, cc) ? 232 + gi : cube;
+    }
+
+    private static int dist(int[] a, int[] b) {
+        int d = 0;
+        for (int i = 0; i < 3; i++) d += (a[i] - b[i]) * (a[i] - b[i]);
+        return d;
+    }
+
+    public static String rgbFg(int[] c) {
+        return TRUECOLOR ? ESC + "[38;2;" + c[0] + ";" + c[1] + ";" + c[2] + "m" : fg(nearest256(c));
+    }
+
+    public static String rgbBg(int[] c) {
+        return TRUECOLOR ? ESC + "[48;2;" + c[0] + ";" + c[1] + ";" + c[2] + "m" : bg(nearest256(c));
+    }
 
     public static String spaces(int n) {
         if (n <= 0) return "";
