@@ -16,6 +16,7 @@ public final class LspManager {
 
     /** (Re)starts the language server for a document. Everything slow happens on background threads. */
     public static void startLsp(Doc d) {
+        d.lspStoppedByUser = false;
         stopLsp(d, false);
         LspDocumentSync sync = LspDocumentSync.tryStart(d.filename, d.editor, new LspClient.Listener() {
             @Override
@@ -64,6 +65,29 @@ public final class LspManager {
             Thread t = new Thread(s::close, "LSP-Cleanup");
             t.setDaemon(true);
             t.start();
+        }
+    }
+
+    /** Language id of a document ("go", "python", ...), or null when the language is not supported. */
+    private static String languageOf(Doc d) {
+        return d == null ? null : LspServers.languageId(d.filename);
+    }
+
+    /**
+     * Keeps only the language server of the ACTIVE (focused) language running. Call it whenever the focus,
+     * a pane's document or a file name changes. The focused document gets its server (unless the user
+     * stopped it with ":lsp stop"); the document in the other pane keeps its server only when it is the
+     * same language, otherwise that server is shut down.
+     */
+    public static void syncActiveLsp() {
+        Doc active = D();
+        Doc other = split == org.maghraby.ui.Split.NONE ? null : docs[1 - focus];
+        if (other != null && other != active && other.lsp != null) {
+            String a = languageOf(active), o = languageOf(other);
+            if (o == null || !o.equals(a)) stopLsp(other, false);
+        }
+        if (active.lsp == null && !active.lspStoppedByUser && languageOf(active) != null) {
+            startLsp(active);
         }
     }
 

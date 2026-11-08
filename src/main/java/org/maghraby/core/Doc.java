@@ -12,6 +12,7 @@ public final class Doc {
     public TextEditor editor;
     public volatile String filename;
     public volatile LspDocumentSync lsp = null;
+    public volatile boolean lspStoppedByUser = false; // ":lsp stop" - do not auto-start again
     public volatile List<LspClient.Diagnostic> diagnostics = new ArrayList<>(); // replaced as a whole, never mutated
     public final HighlightStateCache cache = new HighlightStateCache();         // Render thread only
 

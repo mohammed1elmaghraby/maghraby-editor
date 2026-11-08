@@ -104,8 +104,7 @@ public final class Panes {
         forceClear.set(true);
         switchPane(); // the new pane gets the focus
         if (fresh) {
-            startLsp(target);
-            statusMessage = loadMsg;
+            statusMessage = loadMsg; // switchPane() already started the new document's server
         } else {
             statusMessage = (kind == Split.VERTICAL ? "Vertical" : "Horizontal") + " split. Tab/Ctrl+W switch pane, :q closes it.";
         }
@@ -144,6 +143,7 @@ public final class Panes {
         focus = other;
         keepGoal = true;
         refreshGitBranch();
+        syncActiveLsp(); // only the focused pane's language keeps a language server
     }
 
     /**
@@ -174,6 +174,7 @@ public final class Panes {
         if (!shared) stopLsp(gone, false);
         forceClear.set(true);
         refreshGitBranch();
+        syncActiveLsp();
         return true;
     }
 }

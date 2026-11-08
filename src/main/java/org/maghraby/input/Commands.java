@@ -51,7 +51,10 @@ public final class Commands {
             boolean renamed = !target.equals(D().filename);
             D().filename = target;
             refreshGitBranch();
-            if (renamed) startLsp(D()); // a new name can mean a different language (Untitled.txt -> a.go)
+            if (renamed) { // a new name can mean a different language (Untitled.txt -> a.go)
+                startLsp(D());
+                syncActiveLsp();
+            }
         }
         return ok;
     }
@@ -149,6 +152,7 @@ public final class Commands {
             case "lsp":
                 if (arg.equals("stop")) {
                     stopLsp(D(), false);
+                    D().lspStoppedByUser = true;
                     statusMessage = "LSP stopped.";
                 } else {
                     startLsp(D());
@@ -268,7 +272,7 @@ public final class Commands {
         paneTop[focus] = 0;
         paneLeft[focus] = 0;
         forceClear.set(true);
-        if (loadMsg != null) startLsp(target);
+        syncActiveLsp(); // start the new document's server, stop the other pane's if it is another language
         refreshGitBranch();
         statusMessage = loadMsg != null ? loadMsg : "Opened " + name + " (also shown in the other pane).";
         return true;
