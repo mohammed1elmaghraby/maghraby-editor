@@ -81,6 +81,7 @@ public final class LspManager {
      */
     public static void syncActiveLsp() {
         Doc active = D();
+        if (active == null) return; // a pane without a document
         Doc other = split == org.maghraby.ui.Split.NONE ? null : docs[1 - focus];
         if (other != null && other != active && other.lsp != null) {
             String a = languageOf(active), o = languageOf(other);
